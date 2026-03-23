@@ -397,18 +397,19 @@ def print_report(report):
             else:
                 print(f"  {CYAN}{name:<35}{RESET} [{tech['category']:<12}]")
 
-            # Source evidence line: [source_type:line] matched_text
+            # Source evidence: source_type  line  matched_text
             if matched:
                 if src_type == "header":
-                    loc = f"[response header]"
+                    loc = "header"
                 elif src_type == "cookie":
-                    loc = f"[set-cookie]"
-                elif line:
-                    loc = f"[{src_type}:L{line}]"
+                    loc = "cookie"
+                elif src_type == "url":
+                    loc = "  src"
                 else:
-                    loc = f"[{src_type}]"
-                matched_display = matched if len(matched) <= 90 else matched[:87] + "..."
-                print(f"    {DIM}{loc} {matched_display}{RESET}")
+                    loc = " html"
+                line_str = f"L{line:<4}" if line else "     "
+                matched_display = matched if len(matched) <= 80 else matched[:77] + "..."
+                print(f"    {DIM}{loc}  {line_str}  {matched_display}{RESET}")
 
     # Security Headers
     sec = report.get("security_headers", {})

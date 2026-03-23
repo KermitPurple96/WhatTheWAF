@@ -505,24 +505,10 @@ def fingerprint_tech(headers, cookies, body):
                     seen.add(tech)
                     version = _extract_version_from_body(body_text, tech)
                     line = _body_line(m.start())
-                    # Get the full line of source where match was found
-                    line_start = body_text.rfind("\n", 0, m.start()) + 1
-                    line_end = body_text.find("\n", m.end())
-                    if line_end == -1:
-                        line_end = min(m.end() + 80, len(body_text))
-                    raw_line = body_text[line_start:line_end].strip()
-                    # Trim to reasonable length centered on match
-                    match_in_line = m.start() - line_start
-                    trim_start = max(0, match_in_line - 10)
-                    trim_end = min(len(raw_line), match_in_line + len(m.group(0)) + 40)
-                    snippet = raw_line[trim_start:trim_end]
-                    if trim_start > 0:
-                        snippet = "..." + snippet
-                    if trim_end < len(raw_line):
-                        snippet = snippet + "..."
+                    matched = _extract_clean_evidence(body_text, m.start(), m.end())
                     results.append({"name": tech, "category": category, "version": version,
                                     "source_type": "html", "line": line,
-                                    "matched": snippet[:120],
+                                    "matched": matched,
                                     "evidence": f"body"})
             except re.error:
                 pass
@@ -537,6 +523,36 @@ def _build_line_index(text):
         if ch == '\n':
             breaks.append(i + 1)
     return breaks
+
+
+def _extract_clean_evidence(body, start, end):
+    """Extract a clean, meaningful snippet around a body match.
+
+    Shows the actual matched text with just enough context to identify
+    the HTML element it lives in.
+    """
+    matched_text = body[start:end]
+
+    # Try to find the nearest enclosing <tag> that is short enough to be useful
+    tag_start = body.rfind("<", max(0, start - 120), start)
+    if tag_start >= 0:
+        tag_end = body.find(">", end)
+        if tag_end >= 0:
+            candidate = body[tag_start:tag_end + 1].replace("\n", " ").strip()
+            candidate = re.sub(r'\s+', ' ', candidate)
+            # Only use the tag if it's reasonably short and contains our match
+            if len(candidate) <= 100:
+                return candidate
+
+    # Fallback: show matched text with tight context
+    # Grab a few chars before/after to show where it is
+    ctx_before = body[max(0, start - 5):start].replace("\n", "").strip()
+    ctx_after = body[end:min(len(body), end + 20)].replace("\n", "").strip()
+    result = f"{ctx_before}{matched_text}{ctx_after}"
+    result = re.sub(r'\s+', ' ', result).strip()
+    if len(result) <= 80:
+        return result
+    return result[:77] + "..."
 
 
 def _guess_generator_category(name):
