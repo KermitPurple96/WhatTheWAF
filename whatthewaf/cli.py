@@ -408,6 +408,42 @@ def print_report(report):
                 asn_str = f"{a.get('provider', '')} [{a.get('country', '??')}]"
             print(f"  {GREEN}{c['ip']:<16}{RESET} via {c['source']:<35} {asn_str}")
 
+    # WAF Bypass Results
+    bypass = report.get("waf_bypass", {})
+    if bypass.get("findings"):
+        print(f"\n{BOLD}{RED}WAF Bypass Testing:{RESET}")
+        # Show baseline
+        bl = bypass.get("baseline", {})
+        if bl and not bl.get("error"):
+            print(f"  Baseline: [{bl.get('status_code', '?')}] {bl.get('url', '?')} "
+                  f"hash={bl.get('body_hash', '?')} waf={'yes' if bl.get('has_waf_headers') else 'no'}")
+
+        # Show findings
+        for f in bypass["findings"]:
+            sev = f.get("severity", "info")
+            if sev == "critical":
+                color = f"{BOLD}{RED}"
+            elif sev == "high":
+                color = RED
+            elif sev == "medium":
+                color = YELLOW
+            else:
+                color = DIM
+            print(f"  {color}[{sev.upper()}]{RESET} {f['detail']}")
+
+        # Show IP test details
+        for t in bypass.get("ip_tests", []):
+            if t.get("accessible") and not t.get("error"):
+                waf_str = f"{GREEN}WAF absent{RESET}" if t.get("waf_absent") else f"{YELLOW}WAF present{RESET}"
+                print(f"    {t['ip']:<16} [{t.get('status_code', '?')}] "
+                      f"server={t.get('server', '?'):<20} hash={t.get('body_hash', '?')} {waf_str}")
+    elif bypass.get("ip_tests"):
+        # No findings but tests were run
+        accessible = [t for t in bypass["ip_tests"] if t.get("accessible")]
+        if not accessible:
+            print(f"\n{BOLD}WAF Bypass Testing:{RESET}")
+            print(f"  {GREEN}No direct IP access possible — origin well-protected{RESET}")
+
     # Historical IPs
     if report.get("historical_ips"):
         print(f"\n{BOLD}Historical DNS Records:{RESET}")

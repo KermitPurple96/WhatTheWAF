@@ -6,7 +6,7 @@ import httpx
 from .modules import (
     dns_resolver, asn_lookup, waf_signatures, tech_fingerprint,
     origin_finder, geoip, security_headers, dns_deep, http_utils,
-    whois_lookup,
+    whois_lookup, waf_bypass,
 )
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -184,6 +184,24 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     if check_history:
         report["historical_ips"] = origin_finder.fetch_historical_ips(domain)
 
+    # 9. WAF bypass testing — test all non-CDN IPs + origin candidates
+    bypass_ips = []
+    # Add direct A record IPs (even CDN ones — sometimes WAF is misconfigured)
+    for rec in asn_records:
+        if rec["ip"] not in bypass_ips:
+            bypass_ips.append(rec["ip"])
+    # Add origin candidates from subdomain leakage
+    for c in report.get("origin_candidates", []):
+        if c["ip"] not in bypass_ips:
+            bypass_ips.append(c["ip"])
+    if bypass_ips:
+        report["waf_bypass"] = waf_bypass.test_bypass(
+            domain, bypass_ips, timeout=timeout,
+            user_agent=user_agent, proxy=proxy,
+        )
+    else:
+        report["waf_bypass"] = {}
+
     # Build summary
     parts = []
     if report["cdn_detected"]:
@@ -194,6 +212,10 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         parts.append(f"WAF: {', '.join(waf_names)}")
     if report["origin_candidates"]:
         parts.append(f"{len(report['origin_candidates'])} potential origin IP(s)")
+    bypass_findings = report.get("waf_bypass", {}).get("findings", [])
+    critical_bypasses = [f for f in bypass_findings if f.get("severity") in ("critical", "high")]
+    if critical_bypasses:
+        parts.append(f"{len(critical_bypasses)} WAF bypass(es) found!")
     if not parts:
         parts.append("No CDN/WAF detected - likely direct to origin")
     report["summary"] = " | ".join(parts)
