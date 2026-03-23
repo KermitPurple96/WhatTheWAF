@@ -308,6 +308,30 @@ def print_report(report):
                 geo_str = f" [{geo['country']}]"
             print(f"  {rec['ip']:<16} {color}{asn_str:<10} {' | '.join(parts)} {cls}{RESET}{geo_str}")
 
+    # IP Service Identification (reverse IP)
+    if report.get("ip_services"):
+        for svc in report["ip_services"]:
+            if svc.get("service") or svc.get("rdns") or svc.get("shared_count"):
+                print(f"\n{BOLD}IP Service: {svc['ip']}{RESET}")
+                if svc.get("rdns"):
+                    print(f"  rDNS:     {CYAN}{svc['rdns']}{RESET}")
+                if svc.get("service"):
+                    desc = f" — {svc['description']}" if svc.get("description") else ""
+                    print(f"  Service:  {YELLOW}{svc['service']}{RESET}{desc}")
+                if svc.get("cert_cn"):
+                    print(f"  Cert CN:  {svc['cert_cn']}")
+                if svc.get("cert_sans_count", 0) > 1:
+                    print(f"  Cert SANs: {svc['cert_sans_count']} domains")
+                    if svc.get("cert_sans"):
+                        print(f"    {DIM}{', '.join(svc['cert_sans'][:8])}{RESET}")
+                if svc.get("shared_count", 0) > 0:
+                    count = svc["shared_count"]
+                    color = RED if count > 100 else YELLOW if count > 10 else GREEN
+                    print(f"  Shared:   {color}{count} domains on this IP{RESET}")
+                    if svc.get("shared_sample"):
+                        sample = svc["shared_sample"][:8]
+                        print(f"    {DIM}{', '.join(sample)}{RESET}")
+
     # Web services (HTTP port probe)
     if report.get("open_ports"):
         print(f"\n{BOLD}Web Services (HTTP probe):{RESET}")

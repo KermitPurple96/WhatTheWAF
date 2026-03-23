@@ -6,7 +6,7 @@ import httpx
 from .modules import (
     dns_resolver, asn_lookup, waf_signatures, tech_fingerprint,
     origin_finder, geoip, security_headers, dns_deep, http_utils,
-    whois_lookup, waf_bypass,
+    whois_lookup, waf_bypass, reverse_ip,
 )
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -113,6 +113,7 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         "cors": {},
         "robots": {},
         "open_ports": [],
+        "ip_services": [],
         "origin_candidates": [], "cert_info": None,
         "historical_ips": [],
         "response_hash": "",
@@ -138,6 +139,12 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         report["ips"] = asn_records
         cdn_ips = {r["ip"] for r in asn_records if r["classification"] == "CDN"}
         report["cdn_detected"] = len(cdn_ips) > 0
+
+        # Reverse IP / service identification
+        status("reverse", f"Identifying services behind {len(a_records)} IP(s)")
+        for ip in a_records:
+            svc = reverse_ip.identify_service(ip, domain, timeout=timeout)
+            report["ip_services"].append(svc)
     else:
         asn_records = []
         cdn_ips = set()
