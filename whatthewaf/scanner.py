@@ -110,6 +110,7 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         "redirect_chain": [], "http": {},
         "waf": [], "technologies": [],
         "security_headers": {},
+        "cors": {},
         "robots": {},
         "open_ports": [],
         "origin_candidates": [], "cert_info": None,
@@ -181,6 +182,10 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
             resp["headers"], resp["cookies"], resp["body"]
         )
         report["security_headers"] = security_headers.audit_security_headers(resp["headers"])
+
+        # CORS test
+        status("cors", f"CORS misconfiguration testing")
+        report["cors"] = security_headers.test_cors(url, timeout=timeout, proxy=proxy)
     else:
         report["http"] = {"error": resp.get("error", "unknown")}
 

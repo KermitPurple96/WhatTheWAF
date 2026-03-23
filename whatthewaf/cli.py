@@ -321,6 +321,11 @@ def print_report(report):
             print(
                 f"  {GREEN}{p['port']:<6}{RESET} {scheme:<6} [{status}] {CYAN}{p['service']:<25}{RESET}{server_str}{title_str}"
             )
+            # Show extra tech headers found (excluding server which is already shown)
+            tech_hdrs = p.get("tech_headers", {})
+            for hk, hv in tech_hdrs.items():
+                if hk.lower() != "server":
+                    print(f"         {DIM}{hk}: {hv}{RESET}")
 
     # CNAME chain
     if report.get("cnames"):
@@ -409,6 +414,30 @@ def print_report(report):
             print(f"  {YELLOW}Info leaks:{RESET}")
             for leak in sec["info_leaks"]:
                 print(f"    {leak['name']}: {leak['value']} {DIM}({leak['description']}){RESET}")
+
+    # CORS
+    cors = report.get("cors", {})
+    if cors:
+        if cors.get("vulnerable"):
+            print(f"\n{BOLD}{RED}CORS Misconfiguration:{RESET}")
+            for finding in cors["findings"]:
+                if "CRITICAL" in finding:
+                    print(f"  {BOLD}{RED}{finding}{RESET}")
+                elif "HIGH" in finding:
+                    print(f"  {RED}{finding}{RESET}")
+                else:
+                    print(f"  {YELLOW}{finding}{RESET}")
+            for d in cors.get("details", []):
+                if d.get("reflected"):
+                    print(f"    Origin: {d['test_origin']} -> ACAO: {d['acao']}"
+                          + (f" ACAC: {d['acac']}" if d.get("acac") else ""))
+        elif cors.get("details"):
+            # Not vulnerable but show baseline ACAO if set
+            baseline = next((d for d in cors["details"] if d.get("test") == "baseline"), None)
+            if baseline and baseline.get("acao"):
+                print(f"\n{BOLD}CORS:{RESET} {GREEN}Not vulnerable{RESET} (ACAO: {baseline['acao']})")
+            else:
+                print(f"\n{BOLD}CORS:{RESET} {GREEN}No ACAO header — not configured{RESET}")
 
     # SSL Certificate
     if report.get("cert_info"):

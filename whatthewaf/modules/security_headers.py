@@ -86,18 +86,47 @@ SECURITY_HEADERS = [
 
 # Headers that leak information and should ideally be removed
 INFO_LEAK_HEADERS = [
+    # Server / platform
     ("Server", "Reveals web server software and version"),
     ("X-Powered-By", "Reveals backend framework/language"),
     ("X-AspNet-Version", "Reveals ASP.NET version"),
     ("X-AspNetMvc-Version", "Reveals ASP.NET MVC version"),
     ("X-Generator", "Reveals CMS/generator"),
+    # Proxies / caches
+    ("X-Varnish", "Reveals Varnish cache proxy"),
+    ("X-Cache", "Reveals caching layer"),
+    ("X-Cache-Hits", "Reveals cache hit count"),
+    ("X-Rack-Cache", "Reveals Ruby Rack cache"),
+    ("X-Served-By", "Reveals serving node/cache ID"),
+    ("Via", "Reveals proxy/gateway chain"),
+    # CMS / framework
     ("X-Drupal-Cache", "Reveals Drupal CMS"),
     ("X-Drupal-Dynamic-Cache", "Reveals Drupal CMS"),
-    ("X-Varnish", "Reveals Varnish cache proxy"),
-    ("X-Rack-Cache", "Reveals Ruby Rack cache"),
+    ("X-Litespeed-Cache", "Reveals LiteSpeed cache"),
+    ("X-Shopify-Stage", "Reveals Shopify platform"),
+    ("X-WPE-Backend", "Reveals WP Engine hosting"),
+    ("X-Ah-Environment", "Reveals Acquia hosting environment"),
+    ("X-Pantheon-Styx-Hostname", "Reveals Pantheon hosting"),
+    ("X-Kinsta-Cache", "Reveals Kinsta hosting"),
+    # Debug / internal
     ("X-Runtime", "Reveals server processing time"),
+    ("X-Request-Id", "Reveals internal request ID"),
+    ("X-Correlation-Id", "Reveals internal correlation ID"),
     ("X-Debug-Token", "Debug token — should not be in production"),
     ("X-Debug-Token-Link", "Debug link — should not be in production"),
+    ("X-Debug-Info", "Debug info — should not be in production"),
+    # CI/CD / infra
+    ("X-Jenkins", "Reveals Jenkins CI"),
+    ("X-GitLab-Meta", "Reveals GitLab"),
+    ("X-Amz-Cf-Id", "Reveals AWS CloudFront distribution ID"),
+    ("X-Amz-Request-Id", "Reveals AWS request ID"),
+    ("X-Azure-Ref", "Reveals Azure infrastructure"),
+    ("X-Backend-Server", "Reveals backend server hostname"),
+    ("X-Upstream", "Reveals upstream server"),
+    ("X-Real-IP", "Reveals real client IP — possible proxy misconfiguration"),
+    ("X-Forwarded-Server", "Reveals forwarding server hostname"),
+    ("X-Host", "Reveals internal hostname"),
+    ("X-Envoy-Upstream-Service-Time", "Reveals Envoy service mesh"),
 ]
 
 
@@ -220,3 +249,136 @@ def _check_header_quality(spec, value):
         if not any(g.lower() in value_lower for g in good):
             warnings.append(f"{spec['name']}: unexpected value '{value}' (expected: {', '.join(good)})")
     return warnings
+
+
+# --- CORS Misconfiguration Testing ---
+
+# Origins to test for CORS reflection
+_CORS_TEST_ORIGINS = [
+    "https://evil.com",
+    "https://attacker.example.com",
+    "null",
+]
+
+
+def test_cors(url, timeout=5, proxy=None):
+    """Test for CORS misconfigurations by sending Origin headers.
+
+    Checks:
+    1. Origin reflection — does Access-Control-Allow-Origin reflect arbitrary origins?
+    2. Null origin — does it accept Origin: null?
+    3. Wildcard — is ACAO set to * ?
+    4. Credentials — does it allow credentials with a reflected/wildcard origin?
+
+    Returns dict with: vulnerable, findings, details
+    """
+    import httpx
+
+    result = {
+        "vulnerable": False,
+        "findings": [],
+        "details": [],
+    }
+
+    client_kwargs = {
+        "timeout": timeout,
+        "follow_redirects": True,
+        "verify": False,
+    }
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    # First: check baseline response without Origin header
+    try:
+        with httpx.Client(**client_kwargs) as client:
+            baseline = client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+        baseline_acao = baseline.headers.get("access-control-allow-origin", "")
+        baseline_acac = baseline.headers.get("access-control-allow-credentials", "")
+
+        if baseline_acao == "*":
+            result["findings"].append("ACAO wildcard (*) — allows any origin to read responses")
+            if baseline_acac.lower() == "true":
+                result["findings"].append("CRITICAL: Wildcard + credentials — but browsers block this combo")
+            result["vulnerable"] = True
+            result["details"].append({
+                "test": "baseline",
+                "acao": baseline_acao,
+                "acac": baseline_acac,
+            })
+    except Exception:
+        return result
+
+    # Test each evil origin
+    for test_origin in _CORS_TEST_ORIGINS:
+        try:
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Origin": test_origin,
+                })
+
+            acao = resp.headers.get("access-control-allow-origin", "")
+            acac = resp.headers.get("access-control-allow-credentials", "")
+            acam = resp.headers.get("access-control-allow-methods", "")
+            acah = resp.headers.get("access-control-allow-headers", "")
+
+            detail = {
+                "test_origin": test_origin,
+                "acao": acao,
+                "acac": acac,
+                "acam": acam,
+                "acah": acah,
+                "reflected": False,
+            }
+
+            if test_origin == "null" and acao == "null":
+                detail["reflected"] = True
+                result["vulnerable"] = True
+                result["findings"].append(
+                    f"Origin 'null' reflected in ACAO — exploitable via sandboxed iframe"
+                )
+            elif acao == test_origin:
+                detail["reflected"] = True
+                result["vulnerable"] = True
+                sev = "CRITICAL" if acac.lower() == "true" else "HIGH"
+                result["findings"].append(
+                    f"{sev}: Origin '{test_origin}' reflected in ACAO"
+                    + (" with credentials" if acac.lower() == "true" else "")
+                )
+
+            result["details"].append(detail)
+
+        except Exception:
+            pass
+
+    # Also test with a subdomain-like origin to check prefix matching
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc.split(":")[0]
+        # Test: evil-domain.com (prefix of real domain)
+        trick_origin = f"https://evil-{domain}"
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.get(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Origin": trick_origin,
+            })
+        acao = resp.headers.get("access-control-allow-origin", "")
+        acac = resp.headers.get("access-control-allow-credentials", "")
+        if acao == trick_origin:
+            result["vulnerable"] = True
+            result["findings"].append(
+                f"Prefix bypass: '{trick_origin}' reflected in ACAO — regex/substring matching flaw"
+            )
+            result["details"].append({
+                "test_origin": trick_origin,
+                "acao": acao,
+                "acac": acac,
+                "reflected": True,
+            })
+    except Exception:
+        pass
+
+    return result

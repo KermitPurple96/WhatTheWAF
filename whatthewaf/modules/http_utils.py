@@ -189,6 +189,9 @@ def probe_ports(host, ports=None, timeout=3):
                 # Try to identify the service from response
                 detected = _identify_service(resp, port, service_hint)
 
+                # Grab interesting headers that reveal software
+                tech_headers = _extract_tech_headers(resp.headers)
+
                 return {
                     "port": port,
                     "status_code": resp.status_code,
@@ -197,6 +200,7 @@ def probe_ports(host, ports=None, timeout=3):
                     "scheme": scheme,
                     "service": detected,
                     "url": url,
+                    "tech_headers": tech_headers,
                 }
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 continue
@@ -287,6 +291,23 @@ WEB_PORTS = {
     8200:  ("Vault", "http"),
     8300:  ("Consul Server", "http"),
 }
+
+
+def _extract_tech_headers(headers):
+    """Extract headers that reveal software, versions, or infrastructure."""
+    interesting = [
+        "server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+        "x-generator", "x-drupal-cache", "x-varnish", "x-cache",
+        "x-served-by", "via", "x-jenkins", "x-gitlab-meta",
+        "x-amz-cf-id", "x-azure-ref", "x-backend-server",
+        "x-upstream", "x-envoy-upstream-service-time", "x-runtime",
+        "x-request-id", "x-litespeed-cache", "x-debug-token",
+    ]
+    found = {}
+    for k, v in headers.items():
+        if k.lower() in interesting:
+            found[k] = v
+    return found
 
 
 def _identify_service(resp, port, hint):
