@@ -384,18 +384,31 @@ def print_report(report):
         print(f"\n{BOLD}Technologies:{RESET}")
         for tech in report["technologies"]:
             version = tech.get("version", "")
-            source = tech.get("source", "")
             name = tech["name"]
+            src_type = tech.get("source_type", "")
+            line = tech.get("line", 0)
+            matched = tech.get("matched", "")
+
+            # Name + version line
             if version:
                 visible_len = len(name) + 1 + len(version)
                 pad = " " * max(35 - visible_len, 1)
                 print(f"  {CYAN}{name}{RESET} {YELLOW}{version}{RESET}{pad} [{tech['category']:<12}]")
             else:
                 print(f"  {CYAN}{name:<35}{RESET} [{tech['category']:<12}]")
-            if source:
-                # Truncate long sources but keep them readable
-                src_display = source if len(source) <= 100 else source[:97] + "..."
-                print(f"    {DIM}{src_display}{RESET}")
+
+            # Source evidence line: [source_type:line] matched_text
+            if matched:
+                if src_type == "header":
+                    loc = f"[response header]"
+                elif src_type == "cookie":
+                    loc = f"[set-cookie]"
+                elif line:
+                    loc = f"[{src_type}:L{line}]"
+                else:
+                    loc = f"[{src_type}]"
+                matched_display = matched if len(matched) <= 90 else matched[:87] + "..."
+                print(f"    {DIM}{loc} {matched_display}{RESET}")
 
     # Security Headers
     sec = report.get("security_headers", {})

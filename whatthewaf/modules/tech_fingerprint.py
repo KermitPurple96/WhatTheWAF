@@ -401,10 +401,25 @@ BODY_TECHS = [
 def fingerprint_tech(headers, cookies, body):
     """Detect technologies from HTTP response.
 
-    Returns list of dicts: name, category, version, evidence
+    Returns list of dicts: name, category, version, source_type, line, matched, evidence
     """
     results = []
     seen = set()
+
+    # Pre-compute line index for body
+    body_text = body or ""
+    _line_breaks = _build_line_index(body_text)
+
+    def _body_line(pos):
+        """Get 1-based line number from character position."""
+        lo, hi = 0, len(_line_breaks)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if _line_breaks[mid] <= pos:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
 
     # Header-based
     for hdr_name, pattern, tech, category in HEADER_TECHS:
@@ -415,10 +430,11 @@ def fingerprint_tech(headers, cookies, body):
                     seen.add(tech)
                     version = _extract_version_from_header(hdr_name, val, tech)
                     results.append({"name": tech, "category": category, "version": version,
-                                    "source": f"{hdr_name}: {val}",
-                                    "evidence": f"header:{hdr_name}={val}" if pattern else f"header:{hdr_name}"})
+                                    "source_type": "header", "line": 0,
+                                    "matched": f"{hdr_name}: {val}",
+                                    "evidence": f"header:{hdr_name}"})
 
-    # Extract raw x-powered-by if it didn't match known patterns
+    # x-powered-by
     xpb = _get_header(headers, "x-powered-by")
     if xpb and xpb not in seen:
         already = any(r["name"].lower() in xpb.lower() for r in results)
@@ -426,8 +442,9 @@ def fingerprint_tech(headers, cookies, body):
             seen.add(xpb)
             version = _extract_version(xpb)
             results.append({"name": xpb, "category": "Framework", "version": version,
-                            "source": f"X-Powered-By: {xpb}",
-                            "evidence": f"header:x-powered-by={xpb}"})
+                            "source_type": "header", "line": 0,
+                            "matched": f"X-Powered-By: {xpb}",
+                            "evidence": f"header:x-powered-by"})
 
     # Cookie-based
     cookie_str = "\n".join(cookies)
@@ -437,15 +454,15 @@ def fingerprint_tech(headers, cookies, body):
                 m = re.search(pattern, cookie_str, re.IGNORECASE)
                 if m:
                     seen.add(tech)
-                    matched = m.group(0)[:60]
+                    matched = m.group(0)[:80]
                     results.append({"name": tech, "category": category, "version": "",
-                                    "source": f"Set-Cookie: ...{matched}...",
-                                    "evidence": f"cookie:{matched}"})
+                                    "source_type": "cookie", "line": 0,
+                                    "matched": matched,
+                                    "evidence": f"cookie"})
             except re.error:
                 pass
 
-    # Meta generator tags — richest source of CMS/plugin versions
-    body_text = body or ""
+    # Meta generator tags
     for m in re.finditer(
         r'<meta[^>]*name=["\x27]generator["\x27][^>]*content=["\x27]([^"\x27>]+)',
         body_text, re.IGNORECASE
@@ -463,15 +480,20 @@ def fingerprint_tech(headers, cookies, body):
         if gen_name not in seen:
             seen.add(gen_name)
             cat = _guess_generator_category(gen_name)
-            raw_tag = m.group(0)[:120]
+            line = _body_line(m.start())
+            tag_text = m.group(0).strip()
+            if len(tag_text) > 100:
+                tag_text = tag_text[:97] + "..."
             results.append({"name": gen_name, "category": cat, "version": gen_ver,
-                            "source": raw_tag,
-                            "evidence": f"meta:generator={gen_value}"})
+                            "source_type": "html", "line": line,
+                            "matched": tag_text,
+                            "evidence": f"meta:generator"})
 
     # Script/link src version extraction
     for m in re.finditer(r'(?:src|href)=["\x27]([^"\x27]+)["\x27]', body_text):
         url = m.group(1)
-        _extract_tech_from_url(url, seen, results)
+        line = _body_line(m.start())
+        _extract_tech_from_url(url, seen, results, line)
 
     # Body pattern-based
     body_lower = body_text.lower()
@@ -482,21 +504,39 @@ def fingerprint_tech(headers, cookies, body):
                 if m:
                     seen.add(tech)
                     version = _extract_version_from_body(body_text, tech)
-                    # Extract context around the match for the source
-                    start = max(0, m.start() - 20)
-                    end = min(len(body_text), m.end() + 40)
-                    snippet = body_text[start:end].replace("\n", " ").strip()
-                    if start > 0:
+                    line = _body_line(m.start())
+                    # Get the full line of source where match was found
+                    line_start = body_text.rfind("\n", 0, m.start()) + 1
+                    line_end = body_text.find("\n", m.end())
+                    if line_end == -1:
+                        line_end = min(m.end() + 80, len(body_text))
+                    raw_line = body_text[line_start:line_end].strip()
+                    # Trim to reasonable length centered on match
+                    match_in_line = m.start() - line_start
+                    trim_start = max(0, match_in_line - 10)
+                    trim_end = min(len(raw_line), match_in_line + len(m.group(0)) + 40)
+                    snippet = raw_line[trim_start:trim_end]
+                    if trim_start > 0:
                         snippet = "..." + snippet
-                    if end < len(body_text):
+                    if trim_end < len(raw_line):
                         snippet = snippet + "..."
                     results.append({"name": tech, "category": category, "version": version,
-                                    "source": snippet[:120],
-                                    "evidence": f"body:{pattern}"})
+                                    "source_type": "html", "line": line,
+                                    "matched": snippet[:120],
+                                    "evidence": f"body"})
             except re.error:
                 pass
 
     return results
+
+
+def _build_line_index(text):
+    """Build list of line-start positions for fast line number lookup."""
+    breaks = [0]
+    for i, ch in enumerate(text):
+        if ch == '\n':
+            breaks.append(i + 1)
+    return breaks
 
 
 def _guess_generator_category(name):
@@ -552,7 +592,7 @@ _URL_TECH_PATTERNS = [
 ]
 
 
-def _extract_tech_from_url(url, seen, results):
+def _extract_tech_from_url(url, seen, results, line=0):
     """Try to identify technologies and versions from a script/link URL."""
     for pattern, tech, category in _URL_TECH_PATTERNS:
         if tech in seen:
@@ -561,14 +601,14 @@ def _extract_tech_from_url(url, seen, results):
         if m:
             seen.add(tech)
             version = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
-            # If no version from regex group, try generic extraction from URL
             if not version:
                 vm = re.search(r'[/\-.]v?(\d+\.\d+(?:\.\d+)?)', url)
                 if vm:
                     version = vm.group(1)
             results.append({"name": tech, "category": category, "version": version,
-                            "source": url[:150],
-                            "evidence": f"url:{url[:80]}"})
+                            "source_type": "url", "line": line,
+                            "matched": url[:150],
+                            "evidence": f"url"})
 
 
 # --- Version extraction ---
