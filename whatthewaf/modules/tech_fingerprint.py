@@ -413,9 +413,10 @@ def fingerprint_tech(headers, cookies, body):
             if not pattern or pattern.lower() in val.lower():
                 if tech not in seen:
                     seen.add(tech)
-                    evidence = f"header:{hdr_name}={val}" if pattern else f"header:{hdr_name}"
                     version = _extract_version_from_header(hdr_name, val, tech)
-                    results.append({"name": tech, "category": category, "version": version, "evidence": evidence})
+                    results.append({"name": tech, "category": category, "version": version,
+                                    "source": f"{hdr_name}: {val}",
+                                    "evidence": f"header:{hdr_name}={val}" if pattern else f"header:{hdr_name}"})
 
     # Extract raw x-powered-by if it didn't match known patterns
     xpb = _get_header(headers, "x-powered-by")
@@ -424,16 +425,22 @@ def fingerprint_tech(headers, cookies, body):
         if not already:
             seen.add(xpb)
             version = _extract_version(xpb)
-            results.append({"name": xpb, "category": "Framework", "version": version, "evidence": f"header:x-powered-by={xpb}"})
+            results.append({"name": xpb, "category": "Framework", "version": version,
+                            "source": f"X-Powered-By: {xpb}",
+                            "evidence": f"header:x-powered-by={xpb}"})
 
     # Cookie-based
     cookie_str = "\n".join(cookies)
     for pattern, tech, category in COOKIE_TECHS:
         if tech not in seen:
             try:
-                if re.search(pattern, cookie_str, re.IGNORECASE):
+                m = re.search(pattern, cookie_str, re.IGNORECASE)
+                if m:
                     seen.add(tech)
-                    results.append({"name": tech, "category": category, "version": "", "evidence": f"cookie:{pattern}"})
+                    matched = m.group(0)[:60]
+                    results.append({"name": tech, "category": category, "version": "",
+                                    "source": f"Set-Cookie: ...{matched}...",
+                                    "evidence": f"cookie:{matched}"})
             except re.error:
                 pass
 
@@ -446,7 +453,6 @@ def fingerprint_tech(headers, cookies, body):
         gen_value = m.group(1).strip()
         if not gen_value:
             continue
-        # Parse "Name Version" or "Name/Version"
         gen_match = re.match(r'^(.+?)[/ ]+(\d+[\d.]+\S*)', gen_value)
         if gen_match:
             gen_name = gen_match.group(1).strip()
@@ -457,9 +463,12 @@ def fingerprint_tech(headers, cookies, body):
         if gen_name not in seen:
             seen.add(gen_name)
             cat = _guess_generator_category(gen_name)
-            results.append({"name": gen_name, "category": cat, "version": gen_ver, "evidence": f"meta:generator={gen_value}"})
+            raw_tag = m.group(0)[:120]
+            results.append({"name": gen_name, "category": cat, "version": gen_ver,
+                            "source": raw_tag,
+                            "evidence": f"meta:generator={gen_value}"})
 
-    # Script/link src version extraction — parse all <script src="..."> and <link href="...">
+    # Script/link src version extraction
     for m in re.finditer(r'(?:src|href)=["\x27]([^"\x27]+)["\x27]', body_text):
         url = m.group(1)
         _extract_tech_from_url(url, seen, results)
@@ -469,10 +478,21 @@ def fingerprint_tech(headers, cookies, body):
     for pattern, tech, category in BODY_TECHS:
         if tech not in seen:
             try:
-                if re.search(pattern, body_lower, re.IGNORECASE):
+                m = re.search(pattern, body_lower, re.IGNORECASE)
+                if m:
                     seen.add(tech)
                     version = _extract_version_from_body(body_text, tech)
-                    results.append({"name": tech, "category": category, "version": version, "evidence": f"body:{pattern}"})
+                    # Extract context around the match for the source
+                    start = max(0, m.start() - 20)
+                    end = min(len(body_text), m.end() + 40)
+                    snippet = body_text[start:end].replace("\n", " ").strip()
+                    if start > 0:
+                        snippet = "..." + snippet
+                    if end < len(body_text):
+                        snippet = snippet + "..."
+                    results.append({"name": tech, "category": category, "version": version,
+                                    "source": snippet[:120],
+                                    "evidence": f"body:{pattern}"})
             except re.error:
                 pass
 
@@ -546,7 +566,9 @@ def _extract_tech_from_url(url, seen, results):
                 vm = re.search(r'[/\-.]v?(\d+\.\d+(?:\.\d+)?)', url)
                 if vm:
                     version = vm.group(1)
-            results.append({"name": tech, "category": category, "version": version, "evidence": f"url:{url[:80]}"})
+            results.append({"name": tech, "category": category, "version": version,
+                            "source": url[:150],
+                            "evidence": f"url:{url[:80]}"})
 
 
 # --- Version extraction ---

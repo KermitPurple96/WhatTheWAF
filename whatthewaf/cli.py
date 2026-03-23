@@ -384,6 +384,7 @@ def print_report(report):
         print(f"\n{BOLD}Technologies:{RESET}")
         for tech in report["technologies"]:
             version = tech.get("version", "")
+            source = tech.get("source", "")
             name = tech["name"]
             if version:
                 visible_len = len(name) + 1 + len(version)
@@ -391,6 +392,10 @@ def print_report(report):
                 print(f"  {CYAN}{name}{RESET} {YELLOW}{version}{RESET}{pad} [{tech['category']:<12}]")
             else:
                 print(f"  {CYAN}{name:<35}{RESET} [{tech['category']:<12}]")
+            if source:
+                # Truncate long sources but keep them readable
+                src_display = source if len(source) <= 100 else source[:97] + "..."
+                print(f"    {DIM}{src_display}{RESET}")
 
     # Security Headers
     sec = report.get("security_headers", {})
