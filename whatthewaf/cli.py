@@ -308,11 +308,19 @@ def print_report(report):
                 geo_str = f" [{geo['country']}]"
             print(f"  {rec['ip']:<16} {color}{asn_str:<10} {' | '.join(parts)} {cls}{RESET}{geo_str}")
 
-    # Open ports
+    # Web services (HTTP port probe)
     if report.get("open_ports"):
-        print(f"\n{BOLD}Open Ports:{RESET}")
+        print(f"\n{BOLD}Web Services (HTTP probe):{RESET}")
         for p in report["open_ports"]:
-            print(f"  {GREEN}{p['port']:<8}{RESET} {p['service']}")
+            title = p.get("title", "")
+            title_str = f"  {DIM}\"{title}\"{RESET}" if title else ""
+            scheme = p.get("scheme", "?")
+            status = p.get("status_code", "?")
+            server = p.get("server", "")
+            server_str = f"  {DIM}({server}){RESET}" if server else ""
+            print(
+                f"  {GREEN}{p['port']:<6}{RESET} {scheme:<6} [{status}] {CYAN}{p['service']:<25}{RESET}{server_str}{title_str}"
+            )
 
     # CNAME chain
     if report.get("cnames"):

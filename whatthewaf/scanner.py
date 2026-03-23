@@ -184,9 +184,9 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     else:
         report["http"] = {"error": resp.get("error", "unknown")}
 
-    # 5. Port probe
+    # 5. HTTP web service probe on common ports
     if a_records:
-        status("ports", f"Port scanning {a_records[0]}")
+        status("ports", f"HTTP probing {len(http_utils.WEB_PORTS)} web ports on {a_records[0]}")
         report["open_ports"] = http_utils.probe_ports(a_records[0])
 
     # 6. SSL certificate
