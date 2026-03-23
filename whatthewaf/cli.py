@@ -181,8 +181,35 @@ def run_alive(targets, args):
         _write_output(json.dumps(results, indent=2), args.output)
 
 
+def _make_status_callback(quiet=False):
+    """Create a live progress callback that prints to stderr."""
+    if quiet:
+        return None
+
+    icons = {
+        "dns": "~", "asn": "$", "recon": "?", "http": ">",
+        "waf": "!", "tech": "#", "ports": ":", "cert": "@",
+        "origins": "*", "history": "<", "bypass": "%",
+    }
+
+    def _status(phase, detail):
+        icon = icons.get(phase, "*")
+        sys.stderr.write(f"\r\033[K{DIM}  [{icon}] {detail}{RESET}")
+        sys.stderr.flush()
+
+    return _status
+
+
+def _clear_status_line():
+    sys.stderr.write("\r\033[K")
+    sys.stderr.flush()
+
+
 def run_full(targets, args):
     reports = []
+    is_json = args.json
+    status_cb = _make_status_callback(quiet=is_json)
+
     scan_kwargs = dict(
         timeout=args.timeout,
         scan_subs=not args.no_subs,
@@ -191,12 +218,15 @@ def run_full(targets, args):
         user_agent=args.user_agent,
         proxy=args.proxy,
         delay=args.delay,
+        on_status=status_cb,
     )
 
     if args.workers > 1 and len(targets) > 1:
         print(f"{CYAN}[*] Scanning {len(targets)} targets with {args.workers} workers...{RESET}", file=sys.stderr)
+        # Batch mode doesn't use live status (too noisy with parallel)
+        scan_kwargs["on_status"] = None
         reports = full_scan_batch(targets, max_workers=args.workers, **scan_kwargs)
-        if not args.json:
+        if not is_json:
             for report in reports:
                 if "error" in report and "target" in report:
                     print(f"{RED}[!] Error scanning {report['target']}: {report['error']}{RESET}", file=sys.stderr)
@@ -207,10 +237,12 @@ def run_full(targets, args):
             print(f"{CYAN}[*] Scanning {target}...{RESET}", file=sys.stderr)
             try:
                 report = full_scan(target, **scan_kwargs)
+                _clear_status_line()
                 reports.append(report)
                 if not args.json:
                     print_report(report)
             except Exception as e:
+                _clear_status_line()
                 print(f"{RED}[!] Error scanning {target}: {e}{RESET}", file=sys.stderr)
                 reports.append({"target": target, "error": str(e)})
 

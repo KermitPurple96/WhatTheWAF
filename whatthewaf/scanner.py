@@ -88,9 +88,18 @@ def origins_scan(inputs):
     return rows
 
 
+def _noop_status(*a, **kw):
+    pass
+
+
 def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
-              check_history=False, user_agent=None, proxy=None, delay=0):
-    """Full recon scan of a target. Returns a comprehensive report dict."""
+              check_history=False, user_agent=None, proxy=None, delay=0,
+              on_status=None):
+    """Full recon scan of a target. Returns a comprehensive report dict.
+
+    on_status: optional callback(phase_name, detail_str) for live progress.
+    """
+    status = on_status or _noop_status
     domain = dns_resolver._clean_domain(target)
     url = target if target.startswith("http") else f"https://{domain}"
 
@@ -111,13 +120,16 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     }
 
     # 1. DNS resolution
+    status("dns", f"Resolving {domain}")
     dns_info = dns_resolver.resolve_domain(domain)
     report["dns"] = dns_info
     report["cnames"] = dns_info.get("cnames", [])
-
-    # 2. ASN lookup + Geolocation (parallel)
     a_records = dns_info.get("a_records", [])
+    status("dns", f"{len(a_records)} IP(s) found")
+
+    # 2. ASN lookup + Geolocation
     if a_records:
+        status("asn", f"ASN + Geolocation for {len(a_records)} IP(s)")
         asn_records = asn_lookup.lookup_asn_bulk(a_records)
         geo_records = geoip.geolocate_bulk(a_records)
         for asn_rec, geo_rec in zip(asn_records, geo_records):
@@ -129,7 +141,8 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         asn_records = []
         cdn_ips = set()
 
-    # 3. Deep DNS analysis + WHOIS (parallel with HTTP)
+    # 3. Deep DNS + WHOIS + redirects + robots (parallel)
+    status("recon", "DNS intel, WHOIS, redirects, robots.txt")
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         dns_deep_fut = pool.submit(dns_deep.deep_dns_analysis, domain)
         whois_fut = pool.submit(whois_lookup.lookup_whois, domain, timeout)
@@ -141,7 +154,8 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         report["redirect_chain"] = redirect_fut.result()
         report["robots"] = robots_fut.result()
 
-    # 4. HTTP fetch + WAF + tech fingerprinting + security headers
+    # 4. HTTP fetch + WAF + tech + security headers
+    status("http", f"Fetching {url}")
     resp = fetch_response(url, timeout=timeout, user_agent=user_agent, proxy=proxy)
     if "error" not in resp:
         report["http"] = {
@@ -154,12 +168,15 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
             resp["body"].encode("utf-8", errors="replace")
         ).hexdigest()
 
+        status("waf", "WAF/CDN signature matching")
         report["waf"] = waf_signatures.detect_waf(
             resp["headers"], resp["cookies"], resp["body"], resp["status"]
         )
         report["waf_detected"] = any(
             d["category"] in ("WAF", "CDN/WAF") for d in report["waf"]
         )
+
+        status("tech", "Technology fingerprinting")
         report["technologies"] = tech_fingerprint.fingerprint_tech(
             resp["headers"], resp["cookies"], resp["body"]
         )
@@ -167,34 +184,37 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     else:
         report["http"] = {"error": resp.get("error", "unknown")}
 
-    # 5. Port probe (quick, on first IP)
+    # 5. Port probe
     if a_records:
+        status("ports", f"Port scanning {a_records[0]}")
         report["open_ports"] = http_utils.probe_ports(a_records[0])
 
-    # 6. SSL certificate check
+    # 6. SSL certificate
     if check_cert and a_records:
+        status("cert", f"SSL certificate for {domain}")
         report["cert_info"] = origin_finder.check_ssl_cert(a_records[0], domain, timeout=timeout)
 
     # 7. Subdomain origin leakage
     if scan_subs and report["cdn_detected"]:
+        status("origins", "Subdomain origin leakage scan")
         candidates = origin_finder.find_origins(domain, cdn_ips=cdn_ips)
         report["origin_candidates"] = [c for c in candidates if not c.get("is_cdn")]
 
     # 8. Historical DNS
     if check_history:
+        status("history", "Historical DNS lookup")
         report["historical_ips"] = origin_finder.fetch_historical_ips(domain)
 
-    # 9. WAF bypass testing — test all non-CDN IPs + origin candidates
+    # 9. WAF bypass testing
     bypass_ips = []
-    # Add direct A record IPs (even CDN ones — sometimes WAF is misconfigured)
     for rec in asn_records:
         if rec["ip"] not in bypass_ips:
             bypass_ips.append(rec["ip"])
-    # Add origin candidates from subdomain leakage
     for c in report.get("origin_candidates", []):
         if c["ip"] not in bypass_ips:
             bypass_ips.append(c["ip"])
     if bypass_ips:
+        status("bypass", f"WAF bypass testing ({len(bypass_ips)} IP(s))")
         report["waf_bypass"] = waf_bypass.test_bypass(
             domain, bypass_ips, timeout=timeout,
             user_agent=user_agent, proxy=proxy,
