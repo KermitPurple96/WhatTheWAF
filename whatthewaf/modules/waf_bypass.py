@@ -88,8 +88,10 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
                 "ip": ip,
                 "detail": f"Origin responds directly at {ip} with Host: {domain}",
                 "severity": "high",
+                "curl": _build_curl_direct_ip(ip, domain, 443, "https"),
+                "curl_len": _build_curl_direct_ip(ip, domain, 443, "https", diff=True),
+                "curl_resolve": _build_curl_resolve(domain, ip, 443),
             }
-            # Check if WAF is actually bypassed
             if ip_result.get("waf_absent"):
                 finding["detail"] += " — WAF signatures absent from direct response"
                 finding["severity"] = "critical"
@@ -101,12 +103,15 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
             if alt_result.get("accessible"):
                 alt_result["port"] = port
                 report["ip_tests"].append(alt_result)
+                scheme = "https" if port in (8443, 443) else "http"
                 report["findings"].append({
                     "type": "alt_port",
                     "ip": ip,
                     "port": port,
                     "detail": f"Origin accessible on port {port} at {ip}",
                     "severity": "high",
+                    "curl": _build_curl_direct_ip(ip, domain, port, scheme),
+                    "curl_resolve": _build_curl_resolve(domain, ip, port),
                 })
 
         # Test HTTP (no TLS) on origin
@@ -119,6 +124,8 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
                 "ip": ip,
                 "detail": f"Origin accessible via plain HTTP at {ip}",
                 "severity": "medium",
+                "curl": _build_curl_direct_ip(ip, domain, 80, "http"),
+                "curl_resolve": _build_curl_resolve(domain, ip, 80, scheme="http"),
             })
 
     # Step 3: Header manipulation on the WAF-fronted domain
@@ -127,11 +134,13 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
         if hdr_result.get("different"):
             report["header_tests"].append(hdr_result)
             hdr_name = list(hdr_set.keys())[0]
+            hdr_val = hdr_set[hdr_name]
             report["findings"].append({
                 "type": "header_spoof",
                 "header": hdr_name,
-                "detail": f"Response changed with {hdr_name}: {hdr_set[hdr_name]}",
+                "detail": f"Response changed with {hdr_name}: {hdr_val}",
                 "severity": "low",
+                "curl": f"curl -k -s -o /dev/null -w '%{{http_code}}' -H '{hdr_name}: {hdr_val}' https://{domain}/",
             })
 
     return report
@@ -287,3 +296,50 @@ def _client_kwargs(timeout, ua, proxy):
     if proxy:
         kw["proxy"] = proxy
     return kw
+
+
+# --- PoC curl command builders ---
+
+def _build_curl_direct_ip(ip, domain, port=443, scheme="https", diff=False):
+    """Build curl command for direct IP access with Host header.
+
+    Mirrors: curl --path-as-is -i -s -k -H 'Host: domain' https://IP/
+    """
+    if port in (443, 80):
+        url = f"{scheme}://{ip}/"
+    else:
+        url = f"{scheme}://{ip}:{port}/"
+
+    cmd = (
+        f"curl --path-as-is -i -s -k \\\n"
+        f"  -X GET \\\n"
+        f"  -H 'Host: {domain}' \\\n"
+        f"  -H 'Connection: close' \\\n"
+        f"  '{url}'"
+    )
+    if diff:
+        # Version that saves to file for diffing
+        cmd += f" > bypass_ip.html"
+    return cmd
+
+
+def _build_curl_resolve(domain, ip, port=443, scheme="https"):
+    """Build curl command using --resolve to pin DNS.
+
+    Mirrors: curl -L -k --resolve domain:port:IP https://domain/
+    """
+    return (
+        f"curl -L -k -s -i \\\n"
+        f"  --resolve '{domain}:{port}:{ip}' \\\n"
+        f"  '{scheme}://{domain}/'"
+    )
+
+
+def _build_curl_baseline(domain):
+    """Build curl command for normal baseline request."""
+    return f"curl -k -s -i -X GET 'https://{domain}/' > baseline.html"
+
+
+def _build_diff_command():
+    """Build diff command to compare baseline vs bypass."""
+    return "diff <(curl -sk https://DOMAIN/) <(curl -sk -H 'Host: DOMAIN' https://IP/)"

@@ -487,7 +487,7 @@ def print_report(report):
             print(f"  Baseline: [{bl.get('status_code', '?')}] {bl.get('url', '?')} "
                   f"hash={bl.get('body_hash', '?')} waf={'yes' if bl.get('has_waf_headers') else 'no'}")
 
-        # Show findings
+        # Show findings with curl PoC commands
         for f in bypass["findings"]:
             sev = f.get("severity", "info")
             if sev == "critical":
@@ -498,16 +498,43 @@ def print_report(report):
                 color = YELLOW
             else:
                 color = DIM
-            print(f"  {color}[{sev.upper()}]{RESET} {f['detail']}")
+            print(f"\n  {color}[{sev.upper()}]{RESET} {f['detail']}")
+
+            # Show curl PoC commands
+            if f.get("curl"):
+                print(f"\n  {BOLD}PoC (direct IP + Host header):{RESET}")
+                for line in f["curl"].split("\n"):
+                    print(f"    {CYAN}{line}{RESET}")
+
+            if f.get("curl_resolve"):
+                print(f"\n  {BOLD}PoC (DNS pinning --resolve):{RESET}")
+                for line in f["curl_resolve"].split("\n"):
+                    print(f"    {CYAN}{line}{RESET}")
+
+            if f.get("curl_len"):
+                print(f"\n  {BOLD}PoC (save to file for diff):{RESET}")
+                for line in f["curl_len"].split("\n"):
+                    print(f"    {CYAN}{line}{RESET}")
 
         # Show IP test details
+        print(f"\n  {BOLD}Test Results:{RESET}")
         for t in bypass.get("ip_tests", []):
             if t.get("accessible") and not t.get("error"):
                 waf_str = f"{GREEN}WAF absent{RESET}" if t.get("waf_absent") else f"{YELLOW}WAF present{RESET}"
                 print(f"    {t['ip']:<16} [{t.get('status_code', '?')}] "
                       f"server={t.get('server', '?'):<20} hash={t.get('body_hash', '?')} {waf_str}")
+
+        # Diff tip
+        domain = bypass.get("domain", "DOMAIN")
+        print(f"\n  {BOLD}Compare baseline vs bypass:{RESET}")
+        print(f"    {CYAN}curl -sk https://{domain}/ > baseline.html{RESET}")
+        ips_found = [f["ip"] for f in bypass["findings"] if f.get("ip")]
+        if ips_found:
+            ip = ips_found[0]
+            print(f"    {CYAN}curl -sk --path-as-is -H 'Host: {domain}' https://{ip}/ > bypass.html{RESET}")
+            print(f"    {CYAN}diff baseline.html bypass.html{RESET}")
+
     elif bypass.get("ip_tests"):
-        # No findings but tests were run
         accessible = [t for t in bypass["ip_tests"] if t.get("accessible")]
         if not accessible:
             print(f"\n{BOLD}WAF Bypass Testing:{RESET}")
