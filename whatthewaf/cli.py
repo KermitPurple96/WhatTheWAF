@@ -6,7 +6,7 @@ import sys
 import os
 
 from . import __version__
-from .scanner import origins_scan, full_scan
+from .scanner import origins_scan, full_scan, full_scan_batch
 
 # ANSI colors
 RED = "\033[31m"
@@ -16,10 +16,11 @@ BLUE = "\033[34m"
 CYAN = "\033[36m"
 MAGENTA = "\033[35m"
 BOLD = "\033[1m"
+DIM = "\033[2m"
 RESET = "\033[0m"
 
+
 def _load_banner():
-    """Load ASCII banner from file next to the project root."""
     banner_paths = [
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ascii"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "ascii"),
@@ -45,10 +46,11 @@ def main():
         epilog="""
 examples:
   whatthewaf example.com
-  whatthewaf example.com --mode origins
-  whatthewaf -l domains.txt --json
-  cat subs.txt | whatthewaf --stdin --mode origins
-  whatthewaf example.com --full --history
+  whatthewaf example.com -m origins
+  whatthewaf -l domains.txt -m alive
+  whatthewaf example.com --json -o report.json
+  whatthewaf example.com --history --proxy socks5://127.0.0.1:9050
+  cat subs.txt | whatthewaf --stdin -m origins
         """,
     )
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
@@ -58,7 +60,7 @@ examples:
         "-m", "--mode",
         choices=["origins", "full", "alive"],
         default="full",
-        help="Scan mode: origins (quick ASN) | full (deep recon) | alive (httpx probe)",
+        help="Scan mode: origins | full | alive (default: full)",
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("-o", "--output", metavar="FILE", help="Write results to file")
@@ -66,20 +68,22 @@ examples:
     parser.add_argument("--no-cert", action="store_true", help="Skip SSL certificate check")
     parser.add_argument("--history", action="store_true", help="Check historical DNS records")
     parser.add_argument("--timeout", type=int, default=10, help="Request timeout in seconds")
+    parser.add_argument("--proxy", metavar="URL", help="HTTP/SOCKS proxy (e.g. socks5://127.0.0.1:9050)")
+    parser.add_argument("--user-agent", metavar="UA", help="Custom User-Agent string")
+    parser.add_argument("--delay", type=float, default=0, help="Delay between targets in seconds")
+    parser.add_argument("--workers", type=int, default=1, help="Concurrent workers for batch scanning")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress banner")
     parser.add_argument("--no-banner", action="store_true", help="Suppress banner")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
 
     args = parser.parse_args()
 
-    # Suppress urllib3 InsecureRequestWarning
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if not args.quiet and not args.no_banner:
         print(_load_banner(), file=sys.stderr)
 
-    # Collect targets
     targets = collect_targets(args)
     if not targets:
         parser.error("No targets specified. Provide domains, IPs, -l file, or --stdin")
@@ -93,18 +97,13 @@ examples:
 
 
 def collect_targets(args):
-    """Gather targets from all input sources."""
     targets = []
-
-    # From stdin
     if args.stdin or not sys.stdin.isatty():
         if args.stdin or (not args.targets and not args.list):
             for line in sys.stdin:
                 t = line.strip()
                 if t:
                     targets.append(t)
-
-    # From file (-l)
     if args.list:
         try:
             with open(args.list) as f:
@@ -115,11 +114,8 @@ def collect_targets(args):
         except FileNotFoundError:
             print(f"{RED}[!] File not found: {args.list}{RESET}", file=sys.stderr)
             sys.exit(1)
-
-    # From positional args
     for t in (args.targets or []):
         if t.startswith("@"):
-            # @file.txt syntax
             path = t[1:]
             try:
                 with open(path) as f:
@@ -132,137 +128,106 @@ def collect_targets(args):
                 sys.exit(1)
         else:
             targets.append(t)
-
     return targets
 
 
 def run_origins(targets, args):
-    """Run origins mode — quick ASN classification."""
     rows = origins_scan(targets)
-
     if args.json:
-        output = json.dumps(rows, indent=2)
-        _write_output(output, args.output)
+        _write_output(json.dumps(rows, indent=2), args.output)
         return
-
-    # Colored table output — matches the origins() shell function style
     print()
-    print(
-        f"{BLUE}{'Subdomain':<35} {'IP':<16} {'Provider':<45} {'Type'}{RESET}"
-    )
+    print(f"{BLUE}{'Subdomain':<35} {'IP':<16} {'Provider':<45} {'Type'}{RESET}")
     print("-" * 110)
-
     for row in rows:
         cls = row["classification"]
-        if cls == "CDN":
-            color = RED
-        elif cls == "ORIGIN?":
-            color = GREEN
-        else:
-            color = YELLOW
-
-        # Build provider string like: BGP_PREFIX | CC | registry | allocated | AS_NAME, CC
-        provider_parts = []
+        color = RED if cls == "CDN" else GREEN if cls == "ORIGIN?" else YELLOW
+        parts = []
         if row.get("bgp_prefix"):
-            provider_parts.append(row["bgp_prefix"])
-        provider_parts.append(row.get("country", "??"))
+            parts.append(row["bgp_prefix"])
+        parts.append(row.get("country", "??"))
         if row.get("registry"):
-            provider_parts.append(row["registry"])
+            parts.append(row["registry"])
         if row.get("allocated"):
-            provider_parts.append(row["allocated"])
-        provider_parts.append(row.get("provider", "unknown"))
-        provider_str = " | ".join(provider_parts)
-
-        print(
-            f"{YELLOW}{row['domain']:<35}{RESET} {row['ip']:<16}"
-            f"{color}{provider_str} {cls:<8}{RESET}"
-        )
-
+            parts.append(row["allocated"])
+        parts.append(row.get("provider", "unknown"))
+        print(f"{YELLOW}{row['domain']:<35}{RESET} {row['ip']:<16}{color}{' | '.join(parts)} {cls:<8}{RESET}")
     print()
-    _write_output(json.dumps(rows, indent=2), args.output) if args.output else None
+    if args.output:
+        _write_output(json.dumps(rows, indent=2), args.output)
 
 
 def run_alive(targets, args):
-    """Run alive check using httpx."""
     from .modules.alive_check import check_alive
-
     results = check_alive(targets, timeout=args.timeout)
-
     if args.json:
-        output = json.dumps(results, indent=2)
-        _write_output(output, args.output)
+        _write_output(json.dumps(results, indent=2), args.output)
         return
-
     alive_count = sum(1 for r in results if r["alive"])
-    dead_count = len(results) - alive_count
-
     print()
     print(f"{BLUE}{'Target':<35} {'Status':<8} {'Code':<6} {'Title':<40} {'URL'}{RESET}")
     print("-" * 120)
-
     for r in results:
-        if r["alive"]:
-            color = GREEN
-            status = "ALIVE"
-        else:
-            color = RED
-            status = "DEAD"
-
+        color = GREEN if r["alive"] else RED
+        status = "ALIVE" if r["alive"] else "DEAD"
         code = str(r["status_code"]) if r["status_code"] else "-"
         title = r.get("title", "")[:38]
         url = r.get("final_url", "") or r.get("url", "")
-        redirect = f" -> {r['final_url']}" if r.get("redirect") else ""
-
-        print(
-            f"{YELLOW}{r['target']:<35}{RESET} "
-            f"{color}{status:<8}{RESET} {code:<6} {CYAN}{title:<40}{RESET} {url}"
-        )
-
+        print(f"{YELLOW}{r['target']:<35}{RESET} {color}{status:<8}{RESET} {code:<6} {CYAN}{title:<40}{RESET} {url}")
     print()
-    print(f"{GREEN}Alive: {alive_count}{RESET} | {RED}Dead: {dead_count}{RESET} | Total: {len(results)}")
+    print(f"{GREEN}Alive: {alive_count}{RESET} | {RED}Dead: {len(results) - alive_count}{RESET} | Total: {len(results)}")
     print()
-
-    _write_output(json.dumps(results, indent=2), args.output) if args.output else None
+    if args.output:
+        _write_output(json.dumps(results, indent=2), args.output)
 
 
 def run_full(targets, args):
-    """Run full recon scan."""
     reports = []
+    scan_kwargs = dict(
+        timeout=args.timeout,
+        scan_subs=not args.no_subs,
+        check_cert=not args.no_cert,
+        check_history=args.history,
+        user_agent=args.user_agent,
+        proxy=args.proxy,
+        delay=args.delay,
+    )
 
-    for target in targets:
-        print(f"{CYAN}[*] Scanning {target}...{RESET}", file=sys.stderr)
-        try:
-            report = full_scan(
-                target,
-                timeout=args.timeout,
-                scan_subs=not args.no_subs,
-                check_cert=not args.no_cert,
-                check_history=args.history,
-            )
-            reports.append(report)
-
-            if not args.json:
-                print_report(report)
-        except Exception as e:
-            print(f"{RED}[!] Error scanning {target}: {e}{RESET}", file=sys.stderr)
-            reports.append({"target": target, "error": str(e)})
+    if args.workers > 1 and len(targets) > 1:
+        print(f"{CYAN}[*] Scanning {len(targets)} targets with {args.workers} workers...{RESET}", file=sys.stderr)
+        reports = full_scan_batch(targets, max_workers=args.workers, **scan_kwargs)
+        if not args.json:
+            for report in reports:
+                if "error" in report and "target" in report:
+                    print(f"{RED}[!] Error scanning {report['target']}: {report['error']}{RESET}", file=sys.stderr)
+                else:
+                    print_report(report)
+    else:
+        for target in targets:
+            print(f"{CYAN}[*] Scanning {target}...{RESET}", file=sys.stderr)
+            try:
+                report = full_scan(target, **scan_kwargs)
+                reports.append(report)
+                if not args.json:
+                    print_report(report)
+            except Exception as e:
+                print(f"{RED}[!] Error scanning {target}: {e}{RESET}", file=sys.stderr)
+                reports.append({"target": target, "error": str(e)})
 
     if args.json:
-        output = json.dumps(reports, indent=2, default=str)
-        _write_output(output, args.output)
+        _write_output(json.dumps(reports, indent=2, default=str), args.output)
     elif args.output:
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
 
 
 def print_report(report):
-    """Pretty-print a full scan report."""
     print()
-    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}{CYAN}{'=' * 70}{RESET}")
     print(f"{BOLD}{CYAN}  Recon: {report['target']}{RESET}")
-    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}{CYAN}{'=' * 70}{RESET}")
     print(f"{BOLD}Summary:{RESET} {report['summary']}")
 
-    # HTTP response info
+    # HTTP Response
     http = report.get("http", {})
     if http and not http.get("error"):
         print(f"\n{BOLD}HTTP Response:{RESET}")
@@ -273,21 +238,26 @@ def print_report(report):
             print(f"  Content-Type: {http['content_type']}")
         if http.get("url"):
             print(f"  URL: {http['url']}")
+        if report.get("response_hash"):
+            print(f"  Body SHA256: {DIM}{report['response_hash'][:16]}...{RESET}")
     elif http.get("error"):
         print(f"\n{RED}HTTP Error: {http['error']}{RESET}")
 
-    # IPs + ASN (full origins-style output)
+    # Redirect chain
+    chain = report.get("redirect_chain", [])
+    if chain and len(chain) > 1:
+        print(f"\n{BOLD}Redirect Chain:{RESET}")
+        for i, hop in enumerate(chain):
+            marker = "  ->" if i > 0 else "  "
+            status = hop.get("status_code", "?")
+            print(f"  {marker} [{status}] {hop.get('url', '?')}")
+
+    # IPs + ASN + Geo
     if report.get("ips"):
         print(f"\n{BOLD}IP Addresses:{RESET}")
         for rec in report["ips"]:
             cls = rec["classification"]
-            if cls == "CDN":
-                color = RED
-            elif cls == "ORIGIN?":
-                color = GREEN
-            else:
-                color = YELLOW
-            # Full Cymru-style: BGP | CC | registry | allocated | AS Name
+            color = RED if cls == "CDN" else GREEN if cls == "ORIGIN?" else YELLOW
             parts = []
             if rec.get("bgp_prefix"):
                 parts.append(rec["bgp_prefix"])
@@ -297,18 +267,20 @@ def print_report(report):
             if rec.get("allocated"):
                 parts.append(rec["allocated"])
             parts.append(rec.get("provider", "unknown"))
-            provider_str = " | ".join(parts)
             asn_str = f"AS{rec['asn']}" if rec.get("asn") else "AS?"
-            # Geo info
             geo = rec.get("geo", {})
             geo_str = ""
             if geo and geo.get("city"):
                 geo_str = f" [{geo['city']}, {geo.get('region', '')}, {geo.get('country', '')}]"
             elif geo and geo.get("country"):
                 geo_str = f" [{geo['country']}]"
-            print(
-                f"  {rec['ip']:<16} {color}{asn_str:<10} {provider_str} {cls}{RESET}{geo_str}"
-            )
+            print(f"  {rec['ip']:<16} {color}{asn_str:<10} {' | '.join(parts)} {cls}{RESET}{geo_str}")
+
+    # Open ports
+    if report.get("open_ports"):
+        print(f"\n{BOLD}Open Ports:{RESET}")
+        for p in report["open_ports"]:
+            print(f"  {GREEN}{p['port']:<8}{RESET} {p['service']}")
 
     # CNAME chain
     if report.get("cnames"):
@@ -316,18 +288,51 @@ def print_report(report):
         for cname in report["cnames"]:
             print(f"  -> {cname}")
 
+    # DNS Deep
+    dns_deep = report.get("dns_deep", {})
+    if dns_deep:
+        show_dns = False
+        if dns_deep.get("ns_records") or dns_deep.get("mx_records") or dns_deep.get("verified_services") or dns_deep.get("spf") or dns_deep.get("dmarc"):
+            show_dns = True
+        if show_dns:
+            print(f"\n{BOLD}DNS Intelligence:{RESET}")
+            if dns_deep.get("ns_providers"):
+                print(f"  NS Provider: {CYAN}{', '.join(dns_deep['ns_providers'])}{RESET}")
+            if dns_deep.get("ns_records"):
+                print(f"  NS Records:  {', '.join(dns_deep['ns_records'][:4])}")
+            if dns_deep.get("mail_providers"):
+                print(f"  Mail:        {CYAN}{', '.join(dns_deep['mail_providers'])}{RESET}")
+            if dns_deep.get("mx_records"):
+                print(f"  MX Records:  {', '.join(dns_deep['mx_records'][:4])}")
+            if dns_deep.get("spf"):
+                spf = dns_deep["spf"]
+                print(f"  SPF Policy:  {spf['policy']}")
+                if spf.get("includes"):
+                    print(f"  SPF Include: {', '.join(spf['includes'][:5])}")
+            if dns_deep.get("dmarc"):
+                dmarc = dns_deep["dmarc"]
+                print(f"  DMARC:       p={dmarc.get('policy', '?')} rua={dmarc.get('rua', 'none')}")
+            if dns_deep.get("verified_services"):
+                print(f"  Verified:    {CYAN}{', '.join(dns_deep['verified_services'])}{RESET}")
+
+    # WHOIS
+    whois = report.get("whois", {})
+    if whois and whois.get("registrar"):
+        print(f"\n{BOLD}WHOIS:{RESET}")
+        print(f"  Registrar:  {whois['registrar']}")
+        if whois.get("creation_date"):
+            print(f"  Created:    {whois['creation_date']}")
+        if whois.get("expiry_date"):
+            print(f"  Expires:    {whois['expiry_date']}")
+        if whois.get("updated_date"):
+            print(f"  Updated:    {whois['updated_date']}")
+
     # WAF/CDN detections
     if report.get("waf"):
         print(f"\n{BOLD}WAF/CDN Detected:{RESET}")
         for det in report["waf"]:
-            if det["category"] in ("WAF", "CDN/WAF"):
-                color = RED
-            else:
-                color = YELLOW
-            print(
-                f"  {color}{det['name']:<25}{RESET} [{det['category']:<10}] "
-                f"conf={det['confidence']:.0%}  ({', '.join(det['evidence'][:3])})"
-            )
+            color = RED if det["category"] in ("WAF", "CDN/WAF") else YELLOW
+            print(f"  {color}{det['name']:<25}{RESET} [{det['category']:<10}] conf={det['confidence']:.0%}  ({', '.join(det['evidence'][:3])})")
 
     # Technologies
     if report.get("technologies"):
@@ -336,16 +341,34 @@ def print_report(report):
             version = tech.get("version", "")
             name = tech["name"]
             if version:
-                # Name in cyan, version in yellow, then category
                 visible_len = len(name) + 1 + len(version)
                 pad = " " * max(35 - visible_len, 1)
-                print(
-                    f"  {CYAN}{name}{RESET} {YELLOW}{version}{RESET}{pad} [{tech['category']:<12}]"
-                )
+                print(f"  {CYAN}{name}{RESET} {YELLOW}{version}{RESET}{pad} [{tech['category']:<12}]")
             else:
-                print(
-                    f"  {CYAN}{name:<35}{RESET} [{tech['category']:<12}]"
-                )
+                print(f"  {CYAN}{name:<35}{RESET} [{tech['category']:<12}]")
+
+    # Security Headers
+    sec = report.get("security_headers", {})
+    if sec and sec.get("grade"):
+        grade = sec["grade"]
+        grade_color = GREEN if grade in ("A", "B") else YELLOW if grade == "C" else RED
+        print(f"\n{BOLD}Security Headers:{RESET} {grade_color}Grade {grade}{RESET} ({sec['score']}/{sec['max_score']})")
+        if sec.get("present"):
+            for h in sec["present"]:
+                color = GREEN
+                warn = ""
+                if h.get("warnings"):
+                    color = YELLOW
+                    warn = f" {DIM}({'; '.join(h['warnings'][:1])}){RESET}"
+                print(f"  {color}[+]{RESET} {h['name']}{warn}")
+        if sec.get("missing"):
+            for h in sec["missing"]:
+                sev_color = RED if h["severity"] == "high" else YELLOW if h["severity"] == "medium" else DIM
+                print(f"  {sev_color}[-]{RESET} {h['name']} {DIM}({h['severity']}){RESET}")
+        if sec.get("info_leaks"):
+            print(f"  {YELLOW}Info leaks:{RESET}")
+            for leak in sec["info_leaks"]:
+                print(f"    {leak['name']}: {leak['value']} {DIM}({leak['description']}){RESET}")
 
     # SSL Certificate
     if report.get("cert_info"):
@@ -362,6 +385,19 @@ def print_report(report):
             else:
                 print(f"  SANs:   {len(names)} entries ({', '.join(names[:5])}, ...)")
 
+    # Robots.txt
+    robots = report.get("robots", {})
+    if robots and robots.get("exists"):
+        print(f"\n{BOLD}robots.txt:{RESET}")
+        if robots.get("interesting"):
+            print(f"  {RED}Interesting paths:{RESET}")
+            for p in robots["interesting"][:10]:
+                print(f"    {p}")
+        if robots.get("sitemaps"):
+            print(f"  Sitemaps: {', '.join(robots['sitemaps'][:3])}")
+        if robots.get("disallowed") and not robots.get("interesting"):
+            print(f"  {len(robots['disallowed'])} disallowed paths")
+
     # Origin candidates
     if report.get("origin_candidates"):
         print(f"\n{BOLD}{GREEN}Potential Origin IPs (subdomain leakage):{RESET}")
@@ -370,23 +406,18 @@ def print_report(report):
             if c.get("asn_info"):
                 a = c["asn_info"]
                 asn_str = f"{a.get('provider', '')} [{a.get('country', '??')}]"
-            print(
-                f"  {GREEN}{c['ip']:<16}{RESET} via {c['source']:<35} {asn_str}"
-            )
+            print(f"  {GREEN}{c['ip']:<16}{RESET} via {c['source']:<35} {asn_str}")
 
     # Historical IPs
     if report.get("historical_ips"):
         print(f"\n{BOLD}Historical DNS Records:{RESET}")
         for rec in report["historical_ips"][:10]:
-            print(
-                f"  {rec['ip']:<16} {rec['owner']:<30} last_seen={rec['last_seen']}"
-            )
+            print(f"  {rec['ip']:<16} {rec['owner']:<30} last_seen={rec['last_seen']}")
 
     print()
 
 
 def _write_output(content, filepath):
-    """Write content to file or stdout."""
     if filepath:
         with open(filepath, "w") as f:
             f.write(content)
