@@ -72,32 +72,25 @@ targets              Domain(s), IP(s), or @file.txt
 
 WhatTheWAF can route traffic through ProtonVPN to change your exit IP and bypass IP-based WAF blocks. ProtonVPN is **optional** — the tool works without it.
 
-### Option A: ProtonVPN CLI (recommended for IP rotation)
+### Option A: ProtonVPN official CLI (recommended)
 
 ```bash
-# 1. Install
-pip install protonvpn-cli
+# 1. Install (Kali/Debian)
+wget -qO- https://repo.protonvpn.com/debian/public_key.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/protonvpn.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/protonvpn.gpg] https://repo.protonvpn.com/debian stable main" | sudo tee /etc/apt/sources.list.d/protonvpn.list
+sudo apt update
+sudo apt install -y proton-vpn-cli
 ```
 
-The binary is called `protonvpn` (not `protonvpn-cli`). If your shell can't find it, it's in `~/.local/bin/`:
+The package is `proton-vpn-cli` and installs the binary as `/usr/bin/protonvpn`.
+
+> **Do NOT use** `pip install protonvpn-cli` — that's the old v2 CLI which no longer works (API returns 422).
 
 ```bash
-# Check where it is
-which protonvpn || ls ~/.local/bin/protonvpn
-
-# If not in PATH, add it
-export PATH="$HOME/.local/bin:$PATH"
+# 2. Login with your regular Proton account (the same as ProtonMail)
+protonvpn login kermitpurple96
+# It will ask for your Proton account password
 ```
-
-```bash
-# 2. First-time setup (interactive — asks username, password, plan, protocol)
-protonvpn init
-```
-
-This asks for:
-- **OpenVPN username/password** — NOT your Proton account password. Get these from: https://account.protonvpn.com/account#openvpn-ike2 (look for "OpenVPN / IKEv2 username" and "OpenVPN / IKEv2 password")
-- **ProtonVPN plan** (Free, Basic, Plus, Visionary)
-- **Default protocol** (UDP recommended)
 
 ```bash
 # 3. Connect
