@@ -67,6 +67,8 @@ def main():
                         help="Proxy mode: don't modify TLS fingerprint")
     parser.add_argument("--proxy-verbose", action="store_true",
                         help="Proxy mode: log all requests")
+    parser.add_argument("--random-delay", type=float, default=0,
+                        help="Proxy mode: max random delay (secs) between requests to mimic human")
     parser.add_argument("--proton-check", action="store_true",
                         help="Check ProtonVPN status, connectivity, and IP rotation capability")
     parser.add_argument("--proton-rotate", action="store_true",
@@ -115,6 +117,8 @@ def _run_proxy_mode(args):
         spoof_ua=not args.no_spoof_ua,
         spoof_tls=not args.no_spoof_tls,
         strip_tool_headers=True,
+        add_referer=True,
+        random_delay=args.random_delay,
         verbose=args.proxy_verbose,
     )
 

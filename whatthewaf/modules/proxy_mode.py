@@ -64,6 +64,7 @@ class StealthProxy:
     def __init__(self, listen_host="127.0.0.1", listen_port=8888,
                  upstream_proxy=None, use_proton=False,
                  spoof_ua=True, spoof_tls=True, strip_tool_headers=True,
+                 add_referer=True, random_delay=0,
                  verbose=False):
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -71,6 +72,8 @@ class StealthProxy:
         self.use_proton = use_proton
         self.spoof_ua = spoof_ua
         self.spoof_tls = spoof_tls
+        self.add_referer = add_referer
+        self.random_delay = random_delay  # max seconds of random delay
         self.strip_tool_headers = strip_tool_headers
         self.verbose = verbose
         self.running = False
@@ -154,6 +157,12 @@ class StealthProxy:
     def _handle_client(self, client_sock, addr):
         """Handle an incoming proxy connection."""
         try:
+            # Random delay to mimic human timing
+            if self.random_delay > 0:
+                import random
+                delay = random.uniform(0.1, self.random_delay)
+                time.sleep(delay)
+
             raw = b""
             while True:
                 chunk = client_sock.recv(4096)
@@ -396,18 +405,33 @@ class StealthProxy:
         # Add missing browser headers
         header_names_lower = {k.lower() for k, v in headers}
         if "accept" not in header_names_lower:
-            headers.append(("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"))
+            headers.append(("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"))
         if "accept-language" not in header_names_lower:
             headers.append(("Accept-Language", "en-US,en;q=0.9"))
         if "accept-encoding" not in header_names_lower:
-            headers.append(("Accept-Encoding", "gzip, deflate, br"))
+            headers.append(("Accept-Encoding", "gzip, deflate, br, zstd"))
         if "connection" not in header_names_lower:
             headers.append(("Connection", "keep-alive"))
+        if "upgrade-insecure-requests" not in header_names_lower:
+            headers.append(("Upgrade-Insecure-Requests", "1"))
+
+        # Chrome Client Hints (always present in Chrome 120+)
+        if "sec-ch-ua" not in header_names_lower:
+            headers.append(("sec-ch-ua", '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'))
+            headers.append(("sec-ch-ua-mobile", "?0"))
+            headers.append(("sec-ch-ua-platform", '"Windows"'))
+
+        # Sec-Fetch headers (Chrome sends these on every navigation)
         if "sec-fetch-site" not in header_names_lower:
             headers.append(("Sec-Fetch-Site", "none"))
             headers.append(("Sec-Fetch-Mode", "navigate"))
             headers.append(("Sec-Fetch-User", "?1"))
             headers.append(("Sec-Fetch-Dest", "document"))
+
+        # Referer — if missing, generate a plausible one
+        if self.add_referer and "referer" not in header_names_lower:
+            # Use the target's own origin as referer (looks like internal navigation)
+            headers.append(("Referer", f"https://{host}/"))
 
         # Reorder headers to match browser order
         ordered = []
@@ -483,6 +507,7 @@ class StealthProxy:
 def run_proxy(listen_host="127.0.0.1", listen_port=8888,
               upstream_proxy=None, use_proton=False,
               spoof_ua=True, spoof_tls=True, strip_tool_headers=True,
+              add_referer=True, random_delay=0,
               verbose=False):
     """Start the stealth proxy."""
     proxy = StealthProxy(
@@ -493,6 +518,8 @@ def run_proxy(listen_host="127.0.0.1", listen_port=8888,
         spoof_ua=spoof_ua,
         spoof_tls=spoof_tls,
         strip_tool_headers=strip_tool_headers,
+        add_referer=add_referer,
+        random_delay=random_delay,
         verbose=verbose,
     )
     proxy.start()
