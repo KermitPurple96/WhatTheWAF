@@ -94,16 +94,6 @@ def proton_status():
             break
 
     if result["cli_installed"]:
-        # Get version
-        try:
-            proc = subprocess.run(
-                [result["cli_name"], "--version"],
-                capture_output=True, text=True, timeout=5,
-            )
-            result["cli_version"] = proc.stdout.strip() or proc.stderr.strip()
-        except Exception:
-            pass
-
         # Get status (connected/disconnected)
         try:
             proc = subprocess.run(
@@ -191,16 +181,15 @@ def rotate_proton_ip(timeout=30):
     except Exception:
         pass
 
-    # Reconnect to random server
+    # Reconnect (no flags = fastest server)
     try:
         proc = subprocess.run(
-            [cli_name, "connect", "--fastest"],
+            [cli_name, "connect", "--random"],
             capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode != 0:
-            # Try alternative connect syntax
             proc = subprocess.run(
-                [cli_name, "c", "-f"],
+                [cli_name, "connect"],
                 capture_output=True, text=True, timeout=timeout,
             )
     except subprocess.TimeoutExpired:

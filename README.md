@@ -94,7 +94,7 @@ protonvpn signin kermitpurple96
 
 ```bash
 # 3. Connect
-protonvpn connect --fastest
+protonvpn connect
 
 # 4. Check status
 protonvpn status
@@ -117,7 +117,7 @@ protonvpn disconnect
 
 ```
 protonvpn signin <user>          # Sign in (one-time)
-protonvpn connect --fastest      # Connect to fastest server
+protonvpn connect      # Connect to fastest server
 protonvpn connect --cc NL        # Connect to Netherlands
 protonvpn connect --random       # Connect to random server
 protonvpn status                 # Show connection status
