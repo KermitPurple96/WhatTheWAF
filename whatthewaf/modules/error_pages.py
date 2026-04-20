@@ -220,9 +220,8 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
     path_order = {p[0]: i for i, p in enumerate(PROBES)}
     probe_responses.sort(key=lambda r: path_order.get(r.get("path", ""), 999))
 
-    # Track all seen WAF names and tech names to find extras
+    # Track all seen WAF names to find extras
     all_waf_names = set()
-    all_tech_names = set()
     all_server_leaks = []
     seen_leaks = set()
     status_codes_seen = {}
@@ -280,15 +279,12 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
             "title": title,
             "server": resp["headers"].get("server", resp["headers"].get("Server", "")),
             "waf_hits": [w["name"] for w in waf_hits],
-            "tech_hits": [t["name"] for t in tech_hits],
+            "tech_hits": [],
             "server_leaks": [f"{s['name']} {s['version']}".strip() for s in server_leaks if s["path"] == path],
         })
 
     results["status_map"] = status_codes_seen
     results["server_leaks"] = all_server_leaks
-    # extra_waf and extra_tech will be computed by the caller (scanner)
-    # by diffing against the homepage detections
     results["_all_waf_names"] = list(all_waf_names)
-    results["_all_tech_names"] = list(all_tech_names)
 
     return results
