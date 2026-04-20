@@ -1,6 +1,7 @@
 """Proxy management — test proxy effectiveness against WAF detection."""
 
 import hashlib
+import os
 import shutil
 import subprocess
 import httpx
@@ -75,20 +76,22 @@ def proton_status():
     except Exception:
         pass
 
-    # 2. Check if protonvpn-cli is installed
-    for cli_name in ["protonvpn-cli", "protonvpn", "pvpn"]:
-        cli_path = shutil.which(cli_name)
-        if cli_path:
+    # 2. Check if protonvpn CLI is installed
+    # pip install protonvpn-cli installs binary as "protonvpn" in ~/.local/bin/
+    search_paths = [
+        shutil.which("protonvpn"),
+        shutil.which("protonvpn-cli"),
+        shutil.which("pvpn"),
+        shutil.which("proton-cli"),
+        os.path.expanduser("~/.local/bin/protonvpn"),
+        "/usr/local/bin/protonvpn",
+        "/usr/bin/protonvpn",
+    ]
+    for cli_path in search_paths:
+        if cli_path and os.path.isfile(cli_path):
             result["cli_installed"] = True
-            result["cli_name"] = cli_name
+            result["cli_name"] = cli_path
             break
-
-    if not result["cli_installed"]:
-        # Try the newer proton-cli
-        cli_path = shutil.which("proton-cli")
-        if cli_path:
-            result["cli_installed"] = True
-            result["cli_name"] = "proton-cli"
 
     if result["cli_installed"]:
         # Get version
@@ -166,10 +169,17 @@ def rotate_proton_ip(timeout=30):
 
     # Find CLI
     cli_name = None
-    for name in ["protonvpn-cli", "protonvpn", "pvpn", "proton-cli"]:
-        if shutil.which(name):
-            cli_name = name
+    for name in ["protonvpn", "protonvpn-cli", "pvpn", "proton-cli"]:
+        path = shutil.which(name)
+        if path:
+            cli_name = path
             break
+    if not cli_name:
+        # Check common install locations
+        for path in [os.path.expanduser("~/.local/bin/protonvpn"), "/usr/local/bin/protonvpn"]:
+            if os.path.isfile(path):
+                cli_name = path
+                break
 
     if not cli_name:
         result["error"] = "ProtonVPN CLI not found"

@@ -77,25 +77,62 @@ WhatTheWAF can route traffic through ProtonVPN to change your exit IP and bypass
 ```bash
 # 1. Install
 pip install protonvpn-cli
-
-# 2. Login (one-time, interactive — asks for username + password)
-protonvpn-cli login YOUR_PROTON_USERNAME
-
-# 3. Connect
-protonvpn-cli connect --fastest
-
-# 4. Verify it works
-whatthewaf --proton-check
-
-# 5. Use in scans
-whatthewaf example.com --proton --evasion
-
-# 6. Rotate IP if blocked
-whatthewaf --proton-rotate
-whatthewaf example.com --proton
 ```
 
-You need a Proton account (free tier works but has limited servers). The login credentials are your **Proton account** username and password (the same you use for ProtonMail/ProtonVPN).
+The binary is called `protonvpn` (not `protonvpn-cli`). If your shell can't find it, it's in `~/.local/bin/`:
+
+```bash
+# Check where it is
+which protonvpn || ls ~/.local/bin/protonvpn
+
+# If not in PATH, add it
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+```bash
+# 2. First-time setup (interactive — asks username, password, plan, protocol)
+protonvpn init
+```
+
+This asks for:
+- **OpenVPN username/password** — NOT your Proton account password. Get these from: https://account.protonvpn.com/account#openvpn-ike2 (look for "OpenVPN / IKEv2 username" and "OpenVPN / IKEv2 password")
+- **ProtonVPN plan** (Free, Basic, Plus, Visionary)
+- **Default protocol** (UDP recommended)
+
+```bash
+# 3. Connect
+protonvpn connect --fastest
+
+# 4. Check status
+protonvpn status
+
+# 5. Verify it works with WhatTheWAF
+whatthewaf --proton-check
+
+# 6. Use in scans
+whatthewaf example.com --proton --evasion
+
+# 7. Rotate IP if blocked
+whatthewaf --proton-rotate
+whatthewaf example.com --proton
+
+# 8. Disconnect when done
+protonvpn disconnect
+```
+
+**ProtonVPN CLI quick reference:**
+
+```
+protonvpn init                   # First-time setup
+protonvpn connect --fastest      # Connect to fastest server
+protonvpn connect --cc NL        # Connect to Netherlands
+protonvpn connect --random       # Connect to random server
+protonvpn status                 # Show connection status
+protonvpn disconnect             # Disconnect
+protonvpn reconnect              # Reconnect to last server
+```
+
+**Important:** You need a Proton account (free tier works but limited servers). The CLI uses **OpenVPN credentials**, not your regular Proton login. Get them at https://account.protonvpn.com/account#openvpn-ike2
 
 ### Option B: ProtonVPN GUI (no rotation, simpler)
 
