@@ -87,8 +87,8 @@ The package is `proton-vpn-cli` and installs the binary as `/usr/bin/protonvpn`.
 > **Do NOT use** `pip install protonvpn-cli` — that's the old v2 CLI which no longer works (API returns 422).
 
 ```bash
-# 2. Login with your regular Proton account (the same as ProtonMail)
-protonvpn login kermitpurple96
+# 2. Sign in with your regular Proton account (the same as ProtonMail)
+protonvpn signin kermitpurple96
 # It will ask for your Proton account password
 ```
 
@@ -116,7 +116,7 @@ protonvpn disconnect
 **ProtonVPN CLI quick reference:**
 
 ```
-protonvpn init                   # First-time setup
+protonvpn signin <user>          # Sign in (one-time)
 protonvpn connect --fastest      # Connect to fastest server
 protonvpn connect --cc NL        # Connect to Netherlands
 protonvpn connect --random       # Connect to random server
