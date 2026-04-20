@@ -69,6 +69,22 @@ def main():
                         help="Proxy mode: log all requests")
     parser.add_argument("--random-delay", type=float, default=0,
                         help="Proxy mode: max random delay (secs) between requests to mimic human")
+    parser.add_argument("--install-curl-impersonate", action="store_true",
+                        help="Download and install curl-impersonate (Chrome/Firefox HTTP/2 emulation)")
+    parser.add_argument("--tcp-profile", choices=["windows", "macos"],
+                        help="Apply TCP fingerprint profile (changes TTL, window size — needs sudo)")
+    parser.add_argument("--tcp-revert", action="store_true",
+                        help="Revert TCP fingerprint to Linux defaults")
+    parser.add_argument("--tcp-status", action="store_true",
+                        help="Show current TCP fingerprint (what OS you look like)")
+    parser.add_argument("--solve-challenge", metavar="URL",
+                        help="Solve JS challenge with headless browser and export cookies")
+    parser.add_argument("--install-playwright", action="store_true",
+                        help="Install Playwright + Chromium for JS challenge solving")
+    parser.add_argument("--screenshot", metavar="FILE",
+                        help="Save screenshot when solving challenge")
+    parser.add_argument("--stealth-status", action="store_true",
+                        help="Show status of all evasion capabilities")
     parser.add_argument("--proton-check", action="store_true",
                         help="Check ProtonVPN status, connectivity, and IP rotation capability")
     parser.add_argument("--proton-rotate", action="store_true",
@@ -94,6 +110,27 @@ def main():
     if args.proxy_mode:
         _run_proxy_mode(args)
         return
+    if args.stealth_status:
+        _run_stealth_status()
+        return
+    if args.install_curl_impersonate:
+        _run_install_curl_impersonate()
+        return
+    if args.install_playwright:
+        _run_install_playwright()
+        return
+    if args.tcp_status:
+        _run_tcp_status()
+        return
+    if args.tcp_profile:
+        _run_tcp_profile(args.tcp_profile)
+        return
+    if args.tcp_revert:
+        _run_tcp_revert()
+        return
+    if args.solve_challenge:
+        _run_solve_challenge(args)
+        return
 
     targets = _collect_targets(args)
     if not targets:
@@ -103,6 +140,174 @@ def main():
         _run_origins(targets, args)
     else:
         _run_full(targets, args)
+
+
+def _run_stealth_status():
+    """Show status of all evasion capabilities."""
+    from .modules import http2_fingerprint, tcp_fingerprint, headless_browser, proxy_manager
+
+    print(f"\n{BOLD}Stealth Evasion Status{RESET}")
+    print("=" * 60)
+
+    # ProtonVPN
+    proton = proxy_manager.proton_status()
+    proton_ok = proton.get("socks_available") or proton.get("connected")
+    print(f"\n  {BOLD}IP Rotation (ProtonVPN):{RESET}")
+    print(f"    Status: {GREEN + 'Ready' + RESET if proton_ok else RED + 'Not available' + RESET}")
+    if proton.get("exit_ip"):
+        print(f"    Exit IP: {proton['exit_ip']} ({proton.get('country', '?')})")
+
+    # curl-impersonate
+    print(f"\n  {BOLD}HTTP/2 Fingerprint (curl-impersonate):{RESET}")
+    ci_installed = http2_fingerprint.is_installed()
+    print(f"    Status: {GREEN + 'Installed' + RESET if ci_installed else RED + 'Not installed' + RESET}")
+    if not ci_installed:
+        print(f"    Install: {CYAN}whatthewaf --install-curl-impersonate{RESET}")
+
+    # TCP fingerprint
+    print(f"\n  {BOLD}TCP Fingerprint (p0f evasion):{RESET}")
+    tcp = tcp_fingerprint.get_status()
+    print(f"    Current TTL: {tcp['current_ttl']} → looks like: {YELLOW}{tcp['looks_like']}{RESET}")
+    if tcp.get("iptables_ttl_rules"):
+        print(f"    Active rules: {tcp['iptables_ttl_rules']}")
+    print(f"    Has sudo: {'Yes' if tcp['has_sudo'] else 'No'}")
+    if tcp["looks_like"] != "Windows":
+        print(f"    Apply: {CYAN}whatthewaf --tcp-profile windows{RESET}")
+
+    # Headless browser
+    print(f"\n  {BOLD}JS Challenge Solver (Playwright):{RESET}")
+    pw_installed = headless_browser.is_installed()
+    print(f"    Status: {GREEN + 'Ready' + RESET if pw_installed else RED + 'Not installed' + RESET}")
+    if not pw_installed:
+        print(f"    Install: {CYAN}whatthewaf --install-playwright{RESET}")
+
+    # TLS (always available via proxy mode)
+    print(f"\n  {BOLD}TLS Fingerprint (JA3 evasion):{RESET}")
+    print(f"    Status: {GREEN}Available via --proxy-mode{RESET}")
+
+    print(f"\n{'=' * 60}")
+    print(f"  {BOLD}Full stealth command:{RESET}")
+    print(f"    {CYAN}whatthewaf --proxy-mode --proton --random-delay 2{RESET}")
+    print(f"    + {CYAN}whatthewaf --tcp-profile windows{RESET} (in another terminal)")
+    print()
+
+
+def _run_install_curl_impersonate():
+    """Install curl-impersonate."""
+    from .modules.http2_fingerprint import install, is_installed
+
+    if is_installed():
+        print(f"{GREEN}[+] curl-impersonate already installed{RESET}")
+        return
+
+    print(f"{CYAN}[*] Installing curl-impersonate...{RESET}")
+    result = install(verbose=True)
+    if result["success"]:
+        print(f"{GREEN}[+] Installed: {result['path']}{RESET}")
+    else:
+        print(f"{RED}[!] Failed: {result['error']}{RESET}")
+
+
+def _run_install_playwright():
+    """Install Playwright + Chromium."""
+    from .modules.headless_browser import install
+
+    print(f"{CYAN}[*] Installing Playwright + Chromium...{RESET}")
+    result = install(verbose=True)
+    if result["success"]:
+        print(f"{GREEN}[+] Playwright + Chromium installed{RESET}")
+    else:
+        print(f"{RED}[!] Failed: {result['error']}{RESET}")
+
+
+def _run_tcp_status():
+    """Show TCP fingerprint status."""
+    from .modules.tcp_fingerprint import get_status
+
+    status = get_status()
+    print(f"\n{BOLD}TCP Fingerprint Status{RESET}")
+    print(f"  TTL:              {status['current_ttl']}")
+    print(f"  Looks like:       {YELLOW}{status['looks_like']}{RESET}")
+    print(f"  Window scaling:   {status.get('tcp_window_scaling', '?')}")
+    print(f"  SACK:             {status.get('tcp_sack', '?')}")
+    print(f"  Timestamps:       {status.get('tcp_timestamps', '?')}")
+    print(f"  Has sudo:         {'Yes' if status['has_sudo'] else 'No'}")
+    if status.get("iptables_ttl_rules"):
+        print(f"  Active TTL rules: {status['iptables_ttl_rules']}")
+    print()
+
+
+def _run_tcp_profile(profile_name):
+    """Apply TCP fingerprint profile."""
+    from .modules.tcp_fingerprint import apply_profile
+
+    print(f"{CYAN}[*] Applying {profile_name} TCP profile...{RESET}")
+    result = apply_profile(profile_name)
+
+    if result["changes_made"]:
+        for change in result["changes_made"]:
+            print(f"  {GREEN}[+]{RESET} {change}")
+    if result["errors"]:
+        for err in result["errors"]:
+            print(f"  {RED}[!]{RESET} {err}")
+
+    if result["revert_commands"]:
+        print(f"\n  {BOLD}To revert:{RESET} {CYAN}whatthewaf --tcp-revert{RESET}")
+
+    print()
+
+
+def _run_tcp_revert():
+    """Revert TCP fingerprint."""
+    from .modules.tcp_fingerprint import revert_profile
+
+    print(f"{CYAN}[*] Reverting TCP fingerprint to Linux defaults...{RESET}")
+    result = revert_profile()
+    for change in result["changes_reverted"]:
+        print(f"  {GREEN}[+]{RESET} {change}")
+    print()
+
+
+def _run_solve_challenge(args):
+    """Solve JS challenge with headless browser."""
+    from .modules.headless_browser import solve_challenge, export_cookies_for_curl
+
+    url = args.solve_challenge
+    proxy = None
+    if args.proton:
+        from .modules.proxy_manager import PROTON_SOCKS
+        proxy = PROTON_SOCKS
+    elif args.proxy:
+        proxy = args.proxy
+
+    print(f"{CYAN}[*] Solving challenge at {url}...{RESET}")
+    result = solve_challenge(
+        url, timeout=args.timeout or 30, proxy=proxy,
+        screenshot_path=args.screenshot, verbose=True,
+    )
+
+    if result["success"]:
+        print(f"\n  {BOLD}Result:{RESET}")
+        print(f"    Status: {result['status_code']}")
+        print(f"    Title:  {result['title']}")
+        print(f"    Challenge detected: {'Yes' if result['challenge_detected'] else 'No'}")
+        if result["challenge_detected"]:
+            solved_str = f"{GREEN}SOLVED{RESET}" if result["challenge_solved"] else f"{RED}NOT SOLVED{RESET}"
+            print(f"    Challenge solved:   {solved_str}")
+
+        if result["cookies"]:
+            cookie_str = export_cookies_for_curl(result["cookies"])
+            print(f"\n  {BOLD}Cookies (use in curl):{RESET}")
+            print(f"    {CYAN}curl -sk -b '{cookie_str}' {url}{RESET}")
+            print(f"\n  {BOLD}Or export for other tools:{RESET}")
+            for c in result["cookies"][:10]:
+                print(f"    {c['name']}={c['value'][:50]}")
+
+        if result.get("screenshot_path"):
+            print(f"\n  Screenshot: {result['screenshot_path']}")
+    else:
+        print(f"  {RED}[!] Failed: {result['error']}{RESET}")
+    print()
 
 
 def _run_proxy_mode(args):
