@@ -57,6 +57,16 @@ def main():
     parser.add_argument("--delay", type=float, default=0)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("--proxy-mode", action="store_true",
+                        help="Start as stealth proxy (JA3 evasion + browser headers + ProtonVPN)")
+    parser.add_argument("--listen-port", type=int, default=8888,
+                        help="Port for proxy mode (default: 8888)")
+    parser.add_argument("--no-spoof-ua", action="store_true",
+                        help="Proxy mode: don't replace User-Agent")
+    parser.add_argument("--no-spoof-tls", action="store_true",
+                        help="Proxy mode: don't modify TLS fingerprint")
+    parser.add_argument("--proxy-verbose", action="store_true",
+                        help="Proxy mode: log all requests")
     parser.add_argument("--proton-check", action="store_true",
                         help="Check ProtonVPN status, connectivity, and IP rotation capability")
     parser.add_argument("--proton-rotate", action="store_true",
@@ -72,12 +82,15 @@ def main():
     if not args.quiet and not args.no_banner:
         print(_load_banner(), file=sys.stderr)
 
-    # Handle proton-check / proton-rotate (no target needed)
+    # Handle proton-check / proton-rotate / proxy-mode (no target needed)
     if args.proton_check:
         _run_proton_check()
         return
     if args.proton_rotate:
         _run_proton_rotate()
+        return
+    if args.proxy_mode:
+        _run_proxy_mode(args)
         return
 
     targets = _collect_targets(args)
@@ -88,6 +101,22 @@ def main():
         _run_origins(targets, args)
     else:
         _run_full(targets, args)
+
+
+def _run_proxy_mode(args):
+    """Start stealth proxy mode."""
+    from .modules.proxy_mode import run_proxy
+
+    run_proxy(
+        listen_host="127.0.0.1",
+        listen_port=args.listen_port,
+        upstream_proxy=args.proxy,
+        use_proton=args.proton,
+        spoof_ua=not args.no_spoof_ua,
+        spoof_tls=not args.no_spoof_tls,
+        strip_tool_headers=True,
+        verbose=args.proxy_verbose,
+    )
 
 
 def _run_proton_check():
