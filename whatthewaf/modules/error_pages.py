@@ -280,7 +280,7 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
             "server": resp["headers"].get("server", resp["headers"].get("Server", "")),
             "waf_hits": [w["name"] for w in waf_hits],
             "tech_hits": [],
-            "server_leaks": [f"{s['name']} {s['version']}".strip() for s in server_leaks if s["path"] == path],
+            "server_leaks": [f"{name} {ver}".strip() for name, ver, source in server_leaks],
         })
 
     results["status_map"] = status_codes_seen
