@@ -314,21 +314,35 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
         report["cdn_response"] = {"error": cdn_resp["error"]}
 
     # 3. Direct HTTPS connection to IP with Host header
+    # Use httpx transport with custom DNS to resolve domain → IP directly
+    # This is equivalent to curl --resolve domain:443:ip https://domain/
     status("bypass", f"Direct HTTPS connection to {ip} with Host: {domain}")
     try:
+        import httpcore
+        transport = httpx.HTTPTransport(verify=False)
         client_kwargs = {
             "timeout": timeout, "follow_redirects": True, "verify": False,
+            "transport": transport,
             "headers": {
                 "User-Agent": ua,
-                "Host": domain,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
                 "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "close",
             },
         }
-        with httpx.Client(**client_kwargs) as client:
-            resp = client.get(f"https://{ip}/", extensions={"sni": domain})
+        # Override DNS: make domain resolve to our target IP
+        original_create_connection = httpcore._backends.sync.SyncBackend.connect_tcp
+        def _patched_connect(self, host, port, **kwargs):
+            if str(host) == domain:
+                host = ip
+            return original_create_connection(self, host, port, **kwargs)
+        httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect
+        try:
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.get(f"https://{domain}/")
+        finally:
+            httpcore._backends.sync.SyncBackend.connect_tcp = original_create_connection
         headers = dict(resp.headers)
         set_cookies = resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else []
         cookies = set_cookies if set_cookies else [f"{k}={v}" for k, v in resp.cookies.items()]
@@ -371,13 +385,22 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
             "timeout": timeout, "follow_redirects": True, "verify": False,
             "headers": {
                 "User-Agent": ua,
-                "Host": domain,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Connection": "close",
             },
         }
-        with httpx.Client(**client_kwargs) as client:
-            resp = client.get(f"http://{ip}/")
+        # Same DNS override trick for HTTP
+        original_create_connection2 = httpcore._backends.sync.SyncBackend.connect_tcp
+        def _patched_connect2(self, host, port, **kwargs):
+            if str(host) == domain:
+                host = ip
+            return original_create_connection2(self, host, port, **kwargs)
+        httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect2
+        try:
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.get(f"http://{domain}/")
+        finally:
+            httpcore._backends.sync.SyncBackend.connect_tcp = original_create_connection2
         headers = dict(resp.headers)
         body = _smart_body_cap(resp.text)
         report["direct_http"] = {
