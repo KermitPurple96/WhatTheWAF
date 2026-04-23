@@ -464,9 +464,38 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
                 dns_has_waf = True
                 break
 
+    # Detect default/parking pages (not real content from the target domain)
+    default_vhost_signatures = [
+        "default server vhost", "default web page", "welcome to nginx",
+        "apache2 default page", "it works!", "test page for",
+        "parking page", "domain is not pointed", "still propagating",
+        "domain has been registered", "this domain is parked",
+        "future home of", "coming soon", "under construction",
+        "cpanel", "plesk", "directadmin default", "webmin",
+        "congrats! you have created", "default page",
+        "siteground", "hostinger", "bluehost", "godaddy parking",
+    ]
+    direct_body = report.get("direct_https", {}).get("body", "")
+    direct_title = (report.get("direct_https", {}).get("title") or "").lower()
+    is_default_vhost = False
+    for sig in default_vhost_signatures:
+        if sig in direct_body.lower() or sig in direct_title:
+            is_default_vhost = True
+            report["default_vhost"] = True
+            break
+
+    # Also check x-default-vhost header
+    direct_headers = report.get("direct_https", {}).get("headers", {})
+    if direct_headers.get("x-default-vhost"):
+        is_default_vhost = True
+        report["default_vhost"] = True
+
     if direct_err:
         report["bypass_confirmed"] = False
         report["summary"] = f"Direct connection failed: {direct_err}"
+    elif is_default_vhost:
+        report["bypass_confirmed"] = False
+        report["summary"] = f"DEFAULT VHOST — IP responds with a default/parking page, not the target domain"
     elif direct_status and direct_status != 0:
         waf_gone = cdn_waf_names - direct_waf_names
         same_content = (report.get("cdn_response", {}).get("body_hash") ==
