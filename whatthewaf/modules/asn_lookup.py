@@ -3,14 +3,32 @@
 import socket
 import re
 
-# Known CDN/WAF provider keywords for ASN classification
+# Known CDN/WAF/Cloud provider keywords for ASN classification
+# If the ASN provider name contains any of these, classify as "CDN" (meaning: not a small/unknown origin)
 CDN_KEYWORDS = [
+    # CDN
     "fastly", "cloudflare", "akamai", "edgecast", "cloudfront",
-    "amazon", "aws", "google", "gcp", "shopify", "salesforce",
-    "azure", "microsoft", "cdn", "incapsula", "imperva", "sucuri",
-    "stackpath", "limelight", "verizon", "radware", "f5", "barracuda",
-    "fortinet", "citrix", "netlify", "vercel", "bunny", "keycdn",
-    "maxcdn", "level3", "leaseweb", "ddos-guard", "ovh-hosting",
+    "stackpath", "limelight", "verizon digital", "cdn77", "keycdn",
+    "maxcdn", "bunny", "bunnycdn", "gcore", "g-core", "medianova",
+    "cachefly", "belugacdn", "quantil", "chinacache", "cdnetworks",
+    "azion", "level3", "lumen",
+    # WAF / DDoS protection
+    "incapsula", "imperva", "sucuri", "radware", "f5 ", "barracuda",
+    "fortinet", "citrix", "ddos-guard", "qrator", "stormwall",
+    "nsfocus", "link11", "myra", "neustar", "netscout", "arbor",
+    "wallarm", "reblaze", "datadome", "perimeterx",
+    # Cloud providers
+    "amazon", "aws", "google", "gcp", "azure", "microsoft",
+    "digitalocean", "linode", "vultr", "hetzner", "oracle cloud",
+    "ibm cloud", "softlayer", "rackspace", "scaleway",
+    # Hosting with CDN/proxy
+    "shopify", "salesforce", "netlify", "vercel",
+    "wpengine", "wp engine", "siteground", "kinsta", "pantheon",
+    "flywheel", "pagely", "pressable",
+    # Generic
+    "cdn", "hosting", "ovh", "leaseweb", "contabo", "kamatera",
+    "godaddy", "hostinger", "bluehost", "dreamhost", "ionos",
+    "strato", "upcloud", "aruba", "online.net", "iliad",
 ]
 
 IP_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")

@@ -416,9 +416,44 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
     # Determine if DNS-resolved IPs go through a CDN/WAF
     dns_asn = report.get("dns_resolution", {}).get("asn", [])
     dns_has_cdn = any(r.get("classification") == "CDN" for r in dns_asn)
-    # Check if the CDN is actually a WAF (Cloudflare, Akamai, etc.) vs just hosting (Google Cloud, AWS)
-    cdn_waf_providers = {"cloudflare", "akamai", "imperva", "incapsula", "sucuri", "fastly",
-                         "stackpath", "f5", "barracuda", "fortinet", "edgecast", "verizon"}
+    # CDN/WAF providers: traffic goes through their network and they can inspect/block requests
+    # If DNS resolves to these, direct IP access = WAF bypass
+    cdn_waf_providers = {
+        # Major CDN/WAF
+        "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
+        # WAF-specific
+        "imperva", "incapsula", "sucuri", "radware", "f5", "barracuda",
+        "fortinet", "citrix", "wallarm", "signal sciences", "reblaze",
+        "prophaze", "templarbit", "perimeterx", "human security",
+        "datadome", "shape security",
+        # CDN with WAF capabilities
+        "stackpath", "limelight", "verizon", "cdn77", "keycdn", "maxcdn",
+        "bunny", "bunnycdn", "gcore", "g-core", "medianova",
+        "cachefly", "belugacdn", "quantil", "chinacache", "cdnetworks",
+        "azion", "section.io", "section",
+        # Cloud with built-in WAF/CDN edge
+        "azure front door", "azure cdn", "aws shield", "aws waf",
+        "google cloud armor", "google cloud cdn",
+        # DDoS protection / proxy
+        "ddos-guard", "ddos guard", "qrator", "stormwall", "nsfocus",
+        "link11", "myra", "neustar", "arbor", "netscout",
+        # Hosting with CDN/proxy layer
+        "netlify", "vercel", "shopify", "salesforce",
+        "wpengine", "wp engine", "siteground", "kinsta", "pressable",
+        "pantheon", "flywheel", "pagely",
+    }
+    # Cloud hosting providers: traffic goes directly to origin, NOT a proxy/WAF
+    # If DNS resolves to these, direct IP access = just direct access, not a bypass
+    # (these are excluded from WAF bypass detection)
+    _hosting_providers = {
+        "amazon", "aws", "google", "gcp", "google cloud platform",
+        "azure", "microsoft", "digitalocean", "linode", "akamai linode",
+        "vultr", "hetzner", "ovh", "scaleway", "oracle cloud",
+        "ibm cloud", "softlayer", "rackspace", "godaddy",
+        "hostinger", "bluehost", "dreamhost", "ionos", "1and1",
+        "strato", "contabo", "kamatera", "upcloud", "cherry servers",
+        "leaseweb", "online.net", "iliad", "aruba",
+    }
     dns_has_waf = False
     dns_cdn_name = ""
     for r in dns_asn:
