@@ -10,67 +10,259 @@ cd WhatTheWAF
 pip install -e .
 ```
 
-## Usage
+Both `whatthewaf` and `wtw` commands are available after install.
+
+## Quick Start
 
 ```bash
-# Basic WAF scan
-whatthewaf example.com
+# Full WAF scan
+wtw example.com
 
-# WAF evasion analysis (test what the WAF detects about you)
-whatthewaf example.com --evasion
+# Only WAF detection
+wtw example.com --only waf
 
-# Quick origin IP classification
-whatthewaf example.com -m origins
+# Only IPs + WAF + error pages
+wtw example.com --only ips,waf,errors
 
-# Scan through a proxy
-whatthewaf example.com --proxy socks5://127.0.0.1:9050
+# Direct IP bypass PoC (connect to IP bypassing DNS/CDN)
+wtw example.com --direct-ip 1.2.3.4
+
+# WAF evasion analysis
+wtw example.com --evasion
+
+# Origin IP classification
+wtw example.com -m origins
 
 # Scan through ProtonVPN
-whatthewaf example.com --proton --evasion
-
-# Test multiple proxies against WAF
-whatthewaf example.com --proxy-chain "socks5://proxy1:1080,http://proxy2:8080"
-
-# Batch scan from file
-whatthewaf -l domains.txt --workers 5
+wtw example.com --proton --evasion
 
 # JSON output
-whatthewaf example.com --json -o report.json
-
-# Historical DNS + subdomain origin leakage
-whatthewaf example.com --history
+wtw example.com --json -o report.json
 ```
 
 ## Flags
 
+### Target Selection
+
 ```
-targets              Domain(s), IP(s), or @file.txt
---stdin              Read targets from stdin
--l, --list FILE      Read targets from file
--m, --mode           origins | full (default: full)
---json               JSON output
--o, --output FILE    Write results to file
---evasion            Run WAF evasion analysis (UA, encoding, methods)
---no-tls             Skip TLS fingerprint analysis
---no-subs            Skip subdomain leakage scan
---no-cert            Skip SSL certificate check
---history            Check historical DNS records
---proxy URL          Proxy for all requests (http/socks5)
---proxy-chain LIST   Comma-separated proxies to test against WAF
---proton             Route traffic through ProtonVPN SOCKS (127.0.0.1:1080)
---proton-check       Check ProtonVPN status (no target needed)
---proton-rotate      Rotate ProtonVPN IP (no target needed)
---user-agent UA      Custom User-Agent
---timeout SECS       Request timeout (default: 10)
---delay SECS         Delay between targets
---workers N          Concurrent workers for batch
--q, --quiet          Suppress banner
--v, --version        Show version
+targets                  Domain(s), IP(s), or @file.txt
+--stdin                  Read targets from stdin
+-l, --list FILE          Read targets from file
+-m, --mode               origins | full (default: full)
+```
+
+### Output
+
+```
+--json                   JSON output
+-o, --output FILE        Write results to file
+-q, --quiet              Suppress banner
+--no-banner              Suppress banner (alias)
+-v, --version            Show version
+```
+
+### Module Selection
+
+```
+--only MODULES           Run only specific modules (comma-separated)
+```
+
+Available modules for `--only`:
+
+| Module | What it does |
+|--------|-------------|
+| `ips` | DNS resolution + ASN classification (always included) |
+| `waf` | WAF/CDN signature detection from headers, cookies, body |
+| `errors` | Error page probing (404, 403, 500, WAF trigger paths) |
+| `tls` | TLS fingerprint analysis and config testing |
+| `evasion` | WAF evasion analysis (User-Agent, encoding, methods) |
+| `bypass` | WAF bypass testing via direct IP access |
+| `cert` | SSL certificate inspection (CDN-issued detection) |
+| `subs` | Subdomain origin leakage scan |
+| `history` | Historical DNS record lookup |
+| `proxy` | Proxy effectiveness testing against WAF |
+
+Examples:
+
+```bash
+# Only detect WAF
+wtw example.com --only waf
+
+# IPs and WAF detection
+wtw example.com --only ips,waf
+
+# Full recon minus TLS
+wtw example.com --only ips,waf,errors,bypass,cert,subs
+
+# Evasion analysis only
+wtw example.com --only evasion
+```
+
+### Skip Modules (full scan minus specific modules)
+
+```
+--no-tls                 Skip TLS fingerprint analysis
+--no-subs                Skip subdomain leakage scan
+--no-cert                Skip SSL certificate check
+```
+
+### Enable Optional Modules
+
+```
+--evasion                Run WAF evasion analysis (UA, encoding, methods)
+--history                Check historical DNS records
+```
+
+### Direct IP Bypass PoC
+
+```
+--direct-ip IP           Connect directly to IP bypassing DNS/CDN
+```
+
+Connects to the specified IP with the `Host` header set to the target domain, bypassing DNS resolution and any CDN/WAF in front. Compares the direct response against the normal CDN response to confirm if the WAF can be bypassed.
+
+The output shows:
+
+- DNS resolution (CDN IPs) vs direct IP ASN
+- Side-by-side response comparison (status, server, body hash)
+- WAF signature comparison (present via CDN vs absent on direct)
+- Whether bypass is confirmed
+- Curl commands to reproduce
+
+```bash
+# Test if origin is directly accessible
+wtw example.com --direct-ip 203.0.113.50
+
+# Save PoC as JSON
+wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
+```
+
+### Proxy & VPN
+
+```
+--proxy URL              Proxy for all requests (http/socks5)
+--proxy-chain LIST       Comma-separated proxies to test against WAF
+--proton                 Route traffic through ProtonVPN SOCKS (127.0.0.1:1080)
+--proton-check           Check ProtonVPN status (no target needed)
+--proton-rotate          Rotate ProtonVPN IP (no target needed)
+```
+
+### Stealth & Evasion Tools
+
+```
+--proxy-mode             Start as stealth proxy (JA3 evasion + browser headers)
+--listen-port PORT       Port for proxy mode (default: 8888)
+--no-spoof-ua            Proxy mode: don't replace User-Agent
+--no-spoof-tls           Proxy mode: don't modify TLS fingerprint
+--proxy-verbose          Proxy mode: log all requests
+--random-delay SECS      Proxy mode: max random delay between requests
+```
+
+### TCP Fingerprint (p0f evasion)
+
+```
+--tcp-profile PROFILE    Apply TCP fingerprint: windows | macos (needs sudo)
+--tcp-revert             Revert TCP fingerprint to Linux defaults
+--tcp-status             Show current TCP fingerprint
+```
+
+### JS Challenge Solving
+
+```
+--solve-challenge URL    Solve JS challenge with headless browser, export cookies
+--screenshot FILE        Save screenshot when solving challenge
+--install-playwright     Install Playwright + Chromium
+```
+
+### HTTP/2 Fingerprint
+
+```
+--install-curl-impersonate   Install curl-impersonate (Chrome/Firefox emulation)
+```
+
+### Stealth Status
+
+```
+--stealth-status         Show status of all evasion capabilities
+```
+
+### Request Tuning
+
+```
+--user-agent UA          Custom User-Agent
+--timeout SECS           Request timeout (default: 10)
+--delay SECS             Delay between targets
+--workers N              Concurrent workers for batch scanning
+```
+
+## Usage Examples
+
+### Basic Recon
+
+```bash
+# Full scan
+wtw example.com
+
+# Multiple targets
+wtw example.com target.com another.com
+
+# From file
+wtw -l domains.txt --workers 5
+
+# From stdin
+cat subs.txt | wtw --stdin -m origins
+```
+
+### WAF Bypass Testing
+
+```bash
+# Find origin IPs via subdomain leakage
+wtw example.com --only ips,subs
+
+# Test direct IP access (bypass CDN/WAF)
+wtw example.com --direct-ip 203.0.113.50
+
+# Historical DNS to find old origin IPs
+wtw example.com --only history
+```
+
+### Pentest Workflow with ProtonVPN
+
+```bash
+# 1. Check VPN status
+wtw --proton-check
+
+# 2. Scan target through VPN
+wtw target.com --proton --evasion
+
+# 3. If blocked, rotate IP and retry
+wtw --proton-rotate
+wtw target.com --proton --evasion
+
+# 4. Compare with/without VPN
+wtw target.com --json -o direct.json
+wtw target.com --proton --json -o vpn.json
+```
+
+### Full Stealth Mode
+
+```bash
+# Terminal 1: TCP fingerprint
+sudo wtw --tcp-profile windows
+
+# Terminal 2: Stealth proxy
+wtw --proxy-mode --proton --random-delay 2
+
+# Terminal 3: Scan through stealth proxy
+wtw target.com --proxy http://127.0.0.1:8888 --evasion
+
+# Check all evasion capabilities
+wtw --stealth-status
 ```
 
 ## ProtonVPN Setup
 
-WhatTheWAF can route traffic through ProtonVPN to change your exit IP and bypass IP-based WAF blocks. ProtonVPN is **optional** — the tool works without it.
+WhatTheWAF can route traffic through ProtonVPN to change your exit IP and bypass IP-based WAF blocks. ProtonVPN is **optional**.
 
 ### Option A: ProtonVPN official CLI (recommended)
 
@@ -87,93 +279,45 @@ The package is `proton-vpn-cli` and installs the binary as `/usr/bin/protonvpn`.
 > **Do NOT use** `pip install protonvpn-cli` — that's the old v2 CLI which no longer works (API returns 422).
 
 ```bash
-# 2. Sign in with your regular Proton account (the same as ProtonMail)
-protonvpn signin kermitpurple96
-# It will ask for your Proton account password
-```
+# 2. Sign in
+protonvpn signin <username>
 
-```bash
 # 3. Connect
 protonvpn connect
 
-# 4. Check status
-protonvpn status
+# 4. Verify with WhatTheWAF
+wtw --proton-check
 
-# 5. Verify it works with WhatTheWAF
-whatthewaf --proton-check
+# 5. Use in scans
+wtw example.com --proton --evasion
 
-# 6. Use in scans
-whatthewaf example.com --proton --evasion
+# 6. Rotate IP if blocked
+wtw --proton-rotate
 
-# 7. Rotate IP if blocked
-whatthewaf --proton-rotate
-whatthewaf example.com --proton
-
-# 8. Disconnect when done
+# 7. Disconnect when done
 protonvpn disconnect
 ```
 
 **ProtonVPN CLI quick reference:**
 
 ```
-protonvpn signin <user>          # Sign in (one-time)
-protonvpn connect      # Connect to fastest server
-protonvpn connect --cc NL        # Connect to Netherlands
-protonvpn connect --random       # Connect to random server
-protonvpn status                 # Show connection status
-protonvpn disconnect             # Disconnect
-protonvpn reconnect              # Reconnect to last server
+protonvpn signin <user>          Sign in (one-time)
+protonvpn connect                Connect to fastest server
+protonvpn connect --cc NL        Connect to Netherlands
+protonvpn connect --random       Connect to random server
+protonvpn status                 Show connection status
+protonvpn disconnect             Disconnect
+protonvpn reconnect              Reconnect to last server
 ```
-
-**Important:** You need a Proton account (free tier works but limited servers). The CLI uses **OpenVPN credentials**, not your regular Proton login. Get them at https://account.protonvpn.com/account#openvpn-ike2
 
 ### Option B: ProtonVPN GUI (no rotation, simpler)
 
-If you use the ProtonVPN desktop app instead of the CLI:
-
 1. Open ProtonVPN app and connect to any server
 2. Go to **Settings > Advanced > SOCKS5 Proxy** and enable it on port **1080**
-3. Verify: `whatthewaf --proton-check`
-4. Use: `whatthewaf example.com --proton`
+3. Verify: `wtw --proton-check`
+4. Use: `wtw example.com --proton`
 
 With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
-
-### What --proton-check shows
-
-```
-ProtonVPN Status Check
---------------------------------------------------
-  Your IP (direct):  203.0.113.10
-  CLI installed:     Yes (protonvpn-cli)
-  Logged in:         Yes
-  Connected:         Yes
-  Server:            NL#42
-  SOCKS proxy:       Active (127.0.0.1:1080)
-  Exit IP:           185.107.56.78
-  Location:          Amsterdam, Netherlands
-  ISP:               Proton AG
-
-  [+] IP successfully changed: 203.0.113.10 -> 185.107.56.78
-  [+] IP rotation available — use --proton-rotate to change IP
-```
-
-### Pentest workflow with ProtonVPN
-
-```bash
-# Check you're connected
-whatthewaf --proton-check
-
-# Scan target through ProtonVPN
-whatthewaf target.com --proton --evasion
-
-# If WAF blocks your ProtonVPN IP, rotate and retry
-whatthewaf --proton-rotate
-whatthewaf target.com --proton --evasion
-
-# Compare results with and without VPN
-whatthewaf target.com --json -o direct.json
-whatthewaf target.com --proton --json -o proton.json
-```
 
 ## Modules
 

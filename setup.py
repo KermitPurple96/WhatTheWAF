@@ -15,6 +15,7 @@ setup(
     entry_points={
         "console_scripts": [
             "whatthewaf=whatthewaf.cli:main",
+            "wtw=whatthewaf.cli:main",
         ],
     },
     python_requires=">=3.8",
