@@ -603,6 +603,32 @@ def _print_direct_ip_report(report):
             for k, v in notable.items():
                 _line(f"  {DIM}{k}:{RESET} {v}")
 
+    # Body as readable text (only when bypass confirmed)
+    if bypassed and direct_https and not direct_https.get("error") and direct_https.get("body"):
+        body_html = direct_https["body"]
+        try:
+            import html2text
+            h = html2text.HTML2Text()
+            h.ignore_links = True
+            h.ignore_images = True
+            h.ignore_emphasis = True
+            h.body_width = 100
+            text = h.handle(body_html).strip()
+            # Show first 60 lines max
+            lines = text.split("\n")
+            preview = "\n".join(lines[:60])
+            _section("Direct Response Body (text)", GREEN)
+            for ln in preview.split("\n"):
+                _line(f"{DIM}{ln}{RESET}")
+            if len(lines) > 60:
+                _line(f"{DIM}... ({len(lines) - 60} more lines){RESET}")
+        except ImportError:
+            _section("Direct Response Body (raw preview)", GREEN)
+            _line(f"{DIM}Install html2text for readable output: pip install html2text{RESET}")
+            # Fallback: show raw title + first lines
+            if direct_https.get("title"):
+                _line(f"Title: {direct_https['title']}")
+
     # PoC curl command
     _section("Reproduce", BOLD)
     _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}/{RESET}")

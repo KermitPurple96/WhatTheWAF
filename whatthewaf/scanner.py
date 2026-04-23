@@ -365,6 +365,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
             "body_hash": hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16],
             "body_length": len(body),
             "content_type": headers.get("content-type", ""),
+            "body": body,
         }
         report["waf_direct"] = waf_signatures.detect_waf(headers, cookies, body, resp.status_code)
     except Exception as e:
