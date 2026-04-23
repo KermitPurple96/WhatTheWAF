@@ -588,9 +588,11 @@ def _print_direct_ip_report(report):
 
     # Direct response details (title, headers, content-type)
     if direct_https and not direct_https.get("error"):
+        import html as html_mod
         _section("Direct Response Details", CYAN)
-        if direct_https.get("title"):
-            _line(f"Title:        {BOLD}{direct_https['title']}{RESET}")
+        title = direct_https.get("title", "")
+        if title:
+            _line(f"Title:        {BOLD}{html_mod.unescape(title)}{RESET}")
         _line(f"Status:       {direct_https.get('status', '?')}")
         _line(f"Content-Type: {direct_https.get('content_type', '?')}")
         _line(f"Body Length:  {direct_https.get('body_length', '?')} bytes")
@@ -605,7 +607,15 @@ def _print_direct_ip_report(report):
 
     # Body as readable text (only when bypass confirmed)
     if bypassed and direct_https and not direct_https.get("error") and direct_https.get("body"):
+        import re as _re
         body_html = direct_https["body"]
+
+        # Strip scripts and styles before html2text
+        clean_html = _re.sub(r'<script[^>]*>.*?</script>', '', body_html, flags=_re.DOTALL | _re.IGNORECASE)
+        clean_html = _re.sub(r'<style[^>]*>.*?</style>', '', clean_html, flags=_re.DOTALL | _re.IGNORECASE)
+        clean_html = _re.sub(r'<noscript[^>]*>.*?</noscript>', '', clean_html, flags=_re.DOTALL | _re.IGNORECASE)
+
+        text = ""
         try:
             import html2text
             h = html2text.HTML2Text()
@@ -613,21 +623,25 @@ def _print_direct_ip_report(report):
             h.ignore_images = True
             h.ignore_emphasis = True
             h.body_width = 100
-            text = h.handle(body_html).strip()
-            # Show first 60 lines max
-            lines = text.split("\n")
-            preview = "\n".join(lines[:60])
+            text = h.handle(clean_html).strip()
+        except ImportError:
+            pass
+
+        # If html2text produced nothing (JS-rendered page), extract text manually
+        if not text:
+            # Extract visible text from tags
+            raw_text = _re.sub(r'<[^>]+>', ' ', clean_html)
+            raw_text = _re.sub(r'\s+', ' ', raw_text).strip()
+            import html as html_mod2
+            text = html_mod2.unescape(raw_text)
+
+        if text:
+            lines = [l for l in text.split("\n") if l.strip()]
             _section("Direct Response Body (text)", GREEN)
-            for ln in preview.split("\n"):
+            for ln in lines[:60]:
                 _line(f"{DIM}{ln}{RESET}")
             if len(lines) > 60:
                 _line(f"{DIM}... ({len(lines) - 60} more lines){RESET}")
-        except ImportError:
-            _section("Direct Response Body (raw preview)", GREEN)
-            _line(f"{DIM}Install html2text for readable output: pip install html2text{RESET}")
-            # Fallback: show raw title + first lines
-            if direct_https.get("title"):
-                _line(f"Title: {direct_https['title']}")
 
     # PoC curl command
     _section("Reproduce", BOLD)
