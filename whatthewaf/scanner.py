@@ -413,27 +413,52 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
     cdn_waf_names = {d["name"] for d in report.get("waf_via_cdn", [])}
     direct_waf_names = {d["name"] for d in report.get("waf_direct", [])}
 
+    # Determine if DNS-resolved IPs go through a CDN/WAF
+    dns_asn = report.get("dns_resolution", {}).get("asn", [])
+    dns_has_cdn = any(r.get("classification") == "CDN" for r in dns_asn)
+    # Check if the CDN is actually a WAF (Cloudflare, Akamai, etc.) vs just hosting (Google Cloud, AWS)
+    cdn_waf_providers = {"cloudflare", "akamai", "imperva", "incapsula", "sucuri", "fastly",
+                         "stackpath", "f5", "barracuda", "fortinet", "edgecast", "verizon"}
+    dns_has_waf = False
+    dns_cdn_name = ""
+    for r in dns_asn:
+        if r.get("classification") == "CDN":
+            provider_lower = r.get("provider", "").lower()
+            dns_cdn_name = r.get("provider", "CDN")
+            if any(w in provider_lower for w in cdn_waf_providers):
+                dns_has_waf = True
+                break
+
     if direct_err:
         report["bypass_confirmed"] = False
         report["summary"] = f"Direct connection failed: {direct_err}"
     elif direct_status and direct_status != 0:
-        # Check if WAF signatures are absent in direct response
         waf_gone = cdn_waf_names - direct_waf_names
         same_content = (report.get("cdn_response", {}).get("body_hash") ==
                        report.get("direct_https", {}).get("body_hash"))
 
-        if cdn_provider and direct_server and cdn_provider.lower() not in direct_server.lower():
-            report["bypass_confirmed"] = True
-            report["summary"] = f"BYPASS CONFIRMED — Direct IP responds without CDN/WAF (server: {direct_server})"
-        elif waf_gone:
-            report["bypass_confirmed"] = True
-            report["summary"] = f"BYPASS CONFIRMED — WAF signatures missing in direct response (missing: {', '.join(waf_gone)})"
-        elif direct_status in (200, 301, 302, 403):
-            report["bypass_confirmed"] = True
-            report["summary"] = f"Origin responds on direct IP (status: {direct_status}, server: {direct_server})"
+        if dns_has_waf:
+            # DNS goes through a WAF/CDN — this is a real bypass
+            if cdn_provider and direct_server and cdn_provider.lower() not in direct_server.lower():
+                report["bypass_confirmed"] = True
+                report["summary"] = f"WAF BYPASS CONFIRMED — Direct IP responds without {dns_cdn_name} (server: {direct_server})"
+            elif waf_gone:
+                report["bypass_confirmed"] = True
+                report["summary"] = f"WAF BYPASS CONFIRMED — WAF signatures missing in direct response (missing: {', '.join(waf_gone)})"
+            elif direct_status in (200, 301, 302, 403):
+                report["bypass_confirmed"] = True
+                report["summary"] = f"WAF BYPASS — Origin responds on direct IP bypassing {dns_cdn_name} (status: {direct_status})"
+            else:
+                report["bypass_confirmed"] = False
+                report["summary"] = f"Direct IP responded with status {direct_status} — inconclusive"
         else:
-            report["bypass_confirmed"] = False
-            report["summary"] = f"Direct IP responded with status {direct_status} — inconclusive"
+            # DNS does NOT go through a WAF — just direct IP access
+            if direct_status in (200, 301, 302, 403):
+                report["bypass_confirmed"] = True
+                report["summary"] = f"DIRECT ACCESS — Origin responds on IP (status: {direct_status}, server: {direct_server})"
+            else:
+                report["bypass_confirmed"] = False
+                report["summary"] = f"Direct IP responded with status {direct_status} — inconclusive"
     else:
         report["bypass_confirmed"] = False
         report["summary"] = "Could not determine bypass status"
