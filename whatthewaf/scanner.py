@@ -8,7 +8,7 @@ from .modules import (
     waf_bypass, error_pages, tls_fingerprint, waf_evasion, proxy_manager,
 )
 
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
 
 def fetch_response(url, timeout=10, user_agent=None, proxy=None):
@@ -319,17 +319,9 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
     status("bypass", f"Direct HTTPS connection to {ip} with Host: {domain}")
     try:
         import httpcore
-        transport = httpx.HTTPTransport(verify=False)
         client_kwargs = {
             "timeout": timeout, "follow_redirects": True, "verify": False,
-            "transport": transport,
-            "headers": {
-                "User-Agent": ua,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "close",
-            },
+            "headers": {"User-Agent": ua},
         }
         # Override DNS: make domain resolve to our target IP
         original_create_connection = httpcore._backends.sync.SyncBackend.connect_tcp
@@ -383,11 +375,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
     try:
         client_kwargs = {
             "timeout": timeout, "follow_redirects": True, "verify": False,
-            "headers": {
-                "User-Agent": ua,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Connection": "close",
-            },
+            "headers": {"User-Agent": ua},
         }
         # Same DNS override trick for HTTP
         original_create_connection2 = httpcore._backends.sync.SyncBackend.connect_tcp
