@@ -24,8 +24,10 @@ wtw example.com --only waf
 # Only IPs + WAF + error pages
 wtw example.com --only ips,waf,errors
 
-# Direct IP bypass PoC (connect to IP bypassing DNS/CDN)
+# Direct IP bypass PoC
 wtw example.com --direct-ip 1.2.3.4
+wtw example.com --direct-ip 1.2.3.4,5.6.7.8 --path /login
+wtw example.com --direct-ip auto
 
 # WAF evasion analysis
 wtw example.com --evasion
@@ -345,5 +347,15 @@ With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
 | proxy_manager | ProtonVPN integration, proxy chains, IP rotation |
 | error_pages | Probe 404/403/500/WAF trigger pages |
 | origin_finder | Subdomain leakage, historical DNS, SSL cert analysis |
-| asn_lookup | ASN classification (CDN vs origin) |
+| asn_lookup | ASN classification: 50+ WAF/CDN providers, 30+ hosting providers |
 | dns_resolver | DNS resolution |
+
+## WAF/CDN Provider Detection
+
+The tool distinguishes between WAF/CDN proxies and plain hosting to accurately classify bypass results:
+
+**WAF/CDN (bypass if DNS resolves here):** Cloudflare, Akamai, Fastly, CloudFront, Imperva/Incapsula, Sucuri, Radware, F5, Barracuda, Fortinet, DDoS-Guard, Qrator, StormWall, StackPath, CDN77, Edgecast, Limelight, BunnyCDN, Gcore, Wallarm, Reblaze, DataDome, PerimeterX, Azure Front Door, AWS Shield, Google Cloud Armor, Netlify, Vercel, and more.
+
+**Hosting (direct access, not bypass):** AWS, Google Cloud, Azure, DigitalOcean, Linode, Vultr, Hetzner, OVH, Scaleway, Oracle Cloud, Rackspace, Contabo, Leaseweb, GoDaddy, Hostinger, and more.
+
+**Default vhost detection:** SiteGround, nginx default, Apache default, cPanel, Plesk, parking/propagation pages — automatically rejected as false positives.
