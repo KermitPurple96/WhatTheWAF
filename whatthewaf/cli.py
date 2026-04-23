@@ -520,10 +520,25 @@ def _print_direct_ip_report(report):
     print(f"  Target: {BOLD}{domain}{RESET}  →  IP: {BOLD}{ip}{RESET}")
 
     # Summary
-    if bypassed:
-        print(f"\n  {BOLD}{RED}▶ {report['summary']}{RESET}")
+    summary = report['summary']
+    hash_match = report.get("hash_match", False)
+    if bypassed and hash_match:
+        print(f"\n  {BOLD}{RED}▶ {summary}{RESET}")
+    elif bypassed and not hash_match:
+        print(f"\n  {BOLD}{YELLOW}▶ {summary}{RESET}")
+    elif report.get("default_vhost"):
+        print(f"\n  {BOLD}{DIM}▶ {summary}{RESET}")
     else:
-        print(f"\n  {BOLD}{GREEN}▶ {report['summary']}{RESET}")
+        print(f"\n  {BOLD}{GREEN}▶ {summary}{RESET}")
+
+    # Hash comparison indicator
+    cdn_hash = report.get("cdn_response", {}).get("body_hash")
+    direct_hash_val = report.get("direct_https", {}).get("body_hash")
+    if cdn_hash and direct_hash_val:
+        if hash_match:
+            print(f"  {GREEN}✓ Hash match: {cdn_hash} (CDN) == {direct_hash_val} (direct){RESET}")
+        else:
+            print(f"  {YELLOW}✗ Hash mismatch: {cdn_hash} (CDN) != {direct_hash_val} (direct){RESET}")
 
     # DNS resolution info (only ASN records, no duplicate raw IPs)
     dns = report.get("dns_resolution", {})

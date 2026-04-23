@@ -464,6 +464,12 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
                 dns_has_waf = True
                 break
 
+    # --- Determination logic based on response hashes ---
+
+    cdn_hash = report.get("cdn_response", {}).get("body_hash")
+    direct_hash = report.get("direct_https", {}).get("body_hash")
+    same_hash = cdn_hash and direct_hash and cdn_hash == direct_hash
+
     # Detect default/parking pages (not real content from the target domain)
     default_vhost_signatures = [
         "default server vhost", "default web page", "welcome to nginx",
@@ -483,49 +489,52 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
             is_default_vhost = True
             report["default_vhost"] = True
             break
-
-    # Also check x-default-vhost header
     direct_headers = report.get("direct_https", {}).get("headers", {})
     if direct_headers.get("x-default-vhost"):
         is_default_vhost = True
         report["default_vhost"] = True
 
+    # Store hash comparison in report
+    report["hash_match"] = same_hash
+
     if direct_err:
         report["bypass_confirmed"] = False
         report["summary"] = f"Direct connection failed: {direct_err}"
     elif is_default_vhost:
+        # Default/parking page — not the target domain
         report["bypass_confirmed"] = False
-        report["summary"] = f"DEFAULT VHOST — IP responds with a default/parking page, not the target domain"
-    elif direct_status and direct_status != 0:
-        waf_gone = cdn_waf_names - direct_waf_names
-        same_content = (report.get("cdn_response", {}).get("body_hash") ==
-                       report.get("direct_https", {}).get("body_hash"))
-
-        if dns_has_waf:
-            # DNS goes through a WAF/CDN — this is a real bypass
-            if cdn_provider and direct_server and cdn_provider.lower() not in direct_server.lower():
-                report["bypass_confirmed"] = True
-                report["summary"] = f"WAF BYPASS CONFIRMED — Direct IP responds without {dns_cdn_name} (server: {direct_server})"
-            elif waf_gone:
-                report["bypass_confirmed"] = True
-                report["summary"] = f"WAF BYPASS CONFIRMED — WAF signatures missing in direct response (missing: {', '.join(waf_gone)})"
-            elif direct_status in (200, 301, 302, 403):
-                report["bypass_confirmed"] = True
-                report["summary"] = f"WAF BYPASS — Origin responds on direct IP bypassing {dns_cdn_name} (status: {direct_status})"
-            else:
-                report["bypass_confirmed"] = False
-                report["summary"] = f"Direct IP responded with status {direct_status} — inconclusive"
-        else:
-            # DNS does NOT go through a WAF — just direct IP access
-            if direct_status in (200, 301, 302, 403):
-                report["bypass_confirmed"] = True
-                report["summary"] = f"DIRECT ACCESS — Origin responds on IP (status: {direct_status}, server: {direct_server})"
-            else:
-                report["bypass_confirmed"] = False
-                report["summary"] = f"Direct IP responded with status {direct_status} — inconclusive"
-    else:
+        report["summary"] = "DEFAULT VHOST — IP responds with a default/parking page, not the target domain"
+    elif not direct_status or direct_status == 0:
         report["bypass_confirmed"] = False
         report["summary"] = "Could not determine bypass status"
+    elif same_hash:
+        # Hashes match — same content via CDN and direct IP
+        # This is the strongest confirmation: the origin serves the same content
+        if dns_has_waf:
+            report["bypass_confirmed"] = True
+            report["summary"] = (f"WAF BYPASS CONFIRMED — Same content hash via CDN and direct IP "
+                                 f"(hash: {direct_hash}, bypasses {dns_cdn_name})")
+        else:
+            report["bypass_confirmed"] = True
+            report["summary"] = (f"DIRECT ACCESS CONFIRMED — Same content hash via domain and direct IP "
+                                 f"(hash: {direct_hash})")
+    else:
+        # Hashes don't match — content differs between CDN and direct IP
+        # Could be: different vhost, WAF blocking, different app version, etc.
+        if dns_has_waf and direct_status in (200, 301, 302):
+            # Server responds with real content (not an error) but different from CDN
+            # Likely the origin without CDN transformations (minification, caching, etc.)
+            report["bypass_confirmed"] = True
+            report["summary"] = (f"WAF BYPASS LIKELY — Origin responds (status: {direct_status}) "
+                                 f"but content differs from CDN (CDN hash: {cdn_hash}, direct hash: {direct_hash})")
+        elif not dns_has_waf and direct_status in (200, 301, 302):
+            report["bypass_confirmed"] = True
+            report["summary"] = (f"DIRECT ACCESS — Origin responds (status: {direct_status}) "
+                                 f"but content differs from domain (CDN hash: {cdn_hash}, direct hash: {direct_hash})")
+        else:
+            report["bypass_confirmed"] = False
+            report["summary"] = (f"INCONCLUSIVE — Direct IP responded with status {direct_status}, "
+                                 f"content differs (CDN hash: {cdn_hash}, direct hash: {direct_hash})")
 
     return report
 
