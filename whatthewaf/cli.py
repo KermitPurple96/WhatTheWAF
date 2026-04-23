@@ -512,10 +512,12 @@ def _print_direct_ip_report(report):
     ip = report["ip"]
     bypassed = report.get("bypass_confirmed", False)
 
-    _box_top("Direct IP Bypass PoC", CYAN)
-    _box_line(CYAN, f"Target: {domain}")
-    _box_line(CYAN, f"IP:     {ip}")
-    _box_bottom(CYAN)
+    W = max(len(domain) + 16, 50)
+    title_pad = W - len(domain) - 14
+    print(f"\n{BOLD}{CYAN}╔{'═' * W}╗{RESET}")
+    print(f"{BOLD}{CYAN}║  Bypass PoC: {domain}{' ' * max(title_pad, 1)}║{RESET}")
+    print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
+    print(f"  Target: {BOLD}{domain}{RESET}  →  IP: {BOLD}{ip}{RESET}")
 
     # Summary
     if bypassed:
@@ -523,57 +525,48 @@ def _print_direct_ip_report(report):
     else:
         print(f"\n  {BOLD}{GREEN}▶ {report['summary']}{RESET}")
 
-    # DNS resolution info
+    # DNS resolution info (only ASN records, no duplicate raw IPs)
     dns = report.get("dns_resolution", {})
-    if dns.get("resolved_ips"):
-        _box_top("DNS Resolution (via CDN)", BLUE)
-        for rip in dns["resolved_ips"]:
-            _box_line(BLUE, f"  {rip}")
-        asn_list = dns.get("asn", [])
+    asn_list = dns.get("asn", [])
+    if asn_list:
+        _section("DNS Resolution (via CDN)", BLUE)
         for rec in asn_list:
             cls = rec.get("classification", "?")
             color = RED if cls == "CDN" else GREEN
-            _box_line(BLUE, f"  {color}{rec['ip']:<16} AS{rec.get('asn', '?'):<8} {rec.get('provider', '?')} [{cls}]{RESET}")
-        _box_bottom(BLUE)
+            _line(f"{color}{rec['ip']:<16} AS{rec.get('asn', '?'):<8} {rec.get('provider', '?')} [{cls}]{RESET}")
 
     # Direct IP ASN
     dasn = report.get("direct_ip_asn", {})
     if dasn:
         cls = dasn.get("classification", "?")
         color = GREEN if cls != "CDN" else RED
-        _box_top(f"Direct IP: {ip}", color)
-        _box_line(color, f"  AS{dasn.get('asn', '?'):<8} {dasn.get('provider', '?')} [{cls}]")
-        _box_bottom(color)
+        _section(f"Direct IP: {ip}", color)
+        _line(f"{color}AS{dasn.get('asn', '?'):<8} {dasn.get('provider', '?')} [{cls}]{RESET}")
 
     # Comparison table
     cdn_resp = report.get("cdn_response", {})
     direct_https = report.get("direct_https", {})
     direct_http = report.get("direct_http", {})
 
-    _box_top("Response Comparison", MAGENTA)
-    _box_line(MAGENTA, f"  {'':2} {'Method':<20} {'Status':<10} {'Server':<25} {'Body Hash':<18} {'Length'}")
-    _box_line(MAGENTA, f"  {'':2} {'─' * 20} {'─' * 10} {'─' * 25} {'─' * 18} {'─' * 10}")
+    _section("Response Comparison", MAGENTA)
+    _line(f"{'Method':<22} {'Status':<8} {'Server':<20} {'Hash':<18} {'Length'}")
+    _line(f"{'─' * 22} {'─' * 8} {'─' * 20} {'─' * 18} {'─' * 8}")
 
-    # CDN row
     if cdn_resp and not cdn_resp.get("error"):
-        _box_line(MAGENTA, f"  {YELLOW}☁{RESET} {'Via CDN (normal)':<20} {cdn_resp.get('status', '?'):<10} {cdn_resp.get('server', '?'):<25} {cdn_resp.get('body_hash', '?'):<18} {cdn_resp.get('body_length', '?')}")
+        _line(f"{YELLOW}☁ Via CDN (normal){RESET}     {cdn_resp.get('status', '?'):<8} {cdn_resp.get('server', '?'):<20} {cdn_resp.get('body_hash', '?'):<18} {cdn_resp.get('body_length', '?')}")
     elif cdn_resp.get("error"):
-        _box_line(MAGENTA, f"  {RED}✗{RESET} {'Via CDN (normal)':<20} {RED}Error: {cdn_resp['error']}{RESET}")
+        _line(f"{RED}✗ Via CDN (normal)     Error: {cdn_resp['error'][:50]}{RESET}")
 
-    # Direct HTTPS row
     if direct_https and not direct_https.get("error"):
-        icon = GREEN + "●" + RESET if bypassed else YELLOW + "?" + RESET
-        _box_line(MAGENTA, f"  {icon} {'Direct HTTPS → IP':<20} {direct_https.get('status', '?'):<10} {direct_https.get('server', '?'):<25} {direct_https.get('body_hash', '?'):<18} {direct_https.get('body_length', '?')}")
+        icon = f"{GREEN}●" if bypassed else f"{YELLOW}?"
+        _line(f"{icon} Direct HTTPS → IP{RESET}   {direct_https.get('status', '?'):<8} {direct_https.get('server', '?'):<20} {direct_https.get('body_hash', '?'):<18} {direct_https.get('body_length', '?')}")
     elif direct_https.get("error"):
-        _box_line(MAGENTA, f"  {RED}✗{RESET} {'Direct HTTPS → IP':<20} {RED}{direct_https['error'][:60]}{RESET}")
+        _line(f"{RED}✗ Direct HTTPS → IP   {direct_https['error'][:50]}{RESET}")
 
-    # Direct HTTP row
     if direct_http and not direct_http.get("error"):
-        _box_line(MAGENTA, f"  {'●':} {'Direct HTTP → IP':<20} {direct_http.get('status', '?'):<10} {direct_http.get('server', '?'):<25} {direct_http.get('body_hash', '?'):<18} {direct_http.get('body_length', '?')}")
-    elif direct_http.get("error"):
-        _box_line(MAGENTA, f"  {RED}✗{RESET} {'Direct HTTP → IP':<20} {DIM}{direct_http['error'][:60]}{RESET}")
-
-    _box_bottom(MAGENTA)
+        _line(f"{'● Direct HTTP  → IP':<22} {direct_http.get('status', '?'):<8} {direct_http.get('server', '?'):<20} {direct_http.get('body_hash', '?'):<18} {direct_http.get('body_length', '?')}")
+    elif direct_http and direct_http.get("error"):
+        _line(f"{DIM}✗ Direct HTTP  → IP   {direct_http['error'][:50]}{RESET}")
 
     # WAF comparison
     waf_cdn = report.get("waf_via_cdn", [])
@@ -582,31 +575,38 @@ def _print_direct_ip_report(report):
     direct_names = {d["name"] for d in waf_direct}
 
     if waf_cdn or waf_direct:
-        _box_top("WAF Signature Comparison", RED)
+        _section("WAF Signatures", RED)
         all_names = cdn_names | direct_names
         for name in sorted(all_names):
-            in_cdn = "✓" if name in cdn_names else "✗"
-            in_direct = "✓" if name in direct_names else "✗"
-            cdn_color = YELLOW if name in cdn_names else DIM
-            direct_color = RED if name in direct_names else GREEN
-            _box_line(RED, f"  {name:<25} CDN: {cdn_color}{in_cdn}{RESET}  Direct: {direct_color}{in_direct}{RESET}")
+            in_cdn = f"{YELLOW}✓{RESET}" if name in cdn_names else f"{DIM}✗{RESET}"
+            in_direct = f"{RED}✓{RESET}" if name in direct_names else f"{GREEN}✗{RESET}"
+            _line(f"{name:<25} CDN: {in_cdn}  Direct: {in_direct}")
         gone = cdn_names - direct_names
         if gone:
-            _box_line(RED, "")
-            _box_line(RED, f"  {GREEN}▶ WAF signatures MISSING in direct response: {', '.join(gone)}{RESET}")
-        _box_bottom(RED)
+            print()
+            _line(f"{GREEN}▶ Missing in direct: {', '.join(gone)}{RESET}")
 
-    # Body preview
-    if direct_https and not direct_https.get("error") and direct_https.get("body_preview"):
-        preview = direct_https["body_preview"][:300].replace("\n", "\n  │  ")
-        _box_top("Direct Response Preview", DIM)
-        _box_line(DIM, f"  {preview}")
-        _box_bottom(DIM)
+    # Direct response details (title, headers, content-type)
+    if direct_https and not direct_https.get("error"):
+        _section("Direct Response Details", CYAN)
+        if direct_https.get("title"):
+            _line(f"Title:        {BOLD}{direct_https['title']}{RESET}")
+        _line(f"Status:       {direct_https.get('status', '?')}")
+        _line(f"Content-Type: {direct_https.get('content_type', '?')}")
+        _line(f"Body Length:  {direct_https.get('body_length', '?')} bytes")
+        _line(f"Body Hash:    {direct_https.get('body_hash', '?')}")
+
+        notable = direct_https.get("notable_headers", {})
+        if notable:
+            print()
+            _line(f"{BOLD}Headers:{RESET}")
+            for k, v in notable.items():
+                _line(f"  {DIM}{k}:{RESET} {v}")
 
     # PoC curl command
-    print(f"\n  {BOLD}Reproduce with curl:{RESET}")
-    print(f"  {CYAN}curl -sk -H 'Host: {domain}' https://{ip}/{RESET}")
-    print(f"  {CYAN}curl -sk --resolve {domain}:443:{ip} https://{domain}/{RESET}")
+    _section("Reproduce", BOLD)
+    _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}/{RESET}")
+    _line(f"{CYAN}curl -sk --resolve {domain}:443:{ip} https://{domain}/{RESET}")
     print()
 
 
@@ -667,26 +667,12 @@ def _run_full(targets, args):
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
 
 
-def _strip_ansi(text):
-    """Remove ANSI escape sequences for length calculation."""
-    import re
-    return re.sub(r'\033\[[0-9;]*m', '', text)
+def _section(title, color):
+    print(f"\n  {BOLD}{color}── {title} ──{RESET}")
 
 
-def _box_top(title, color, width=None):
-    if width is None:
-        width = max(len(title) + 6, 50)
-    padding = width - len(title) - 4
-    print(f"\n  {BOLD}{color}┌─ {title} {'─' * max(padding, 1)}┐{RESET}")
-
-
-def _box_line(color, text):
-    print(f"  {color}│{RESET} {text}")
-
-
-def _box_bottom(color, width=None):
-    w = width or 50
-    print(f"  {BOLD}{color}└{'─' * w}┘{RESET}")
+def _line(text):
+    print(f"    {text}")
 
 
 def _print_report(report):
@@ -701,43 +687,39 @@ def _print_report(report):
     # HTTP
     http = report.get("http", {})
     if http and not http.get("error"):
-        _box_top("HTTP Response", BLUE)
-        _box_line(BLUE, f"Status: {http.get('status', '?')}")
-        if http.get("server"): _box_line(BLUE, f"Server: {CYAN}{http['server']}{RESET}")
-        if http.get("url"): _box_line(BLUE, f"URL:    {http['url']}")
-        _box_bottom(BLUE)
+        _section("HTTP Response", BLUE)
+        _line(f"Status: {http.get('status', '?')}")
+        if http.get("server"): _line(f"Server: {CYAN}{http['server']}{RESET}")
+        if http.get("url"): _line(f"URL:    {http['url']}")
     elif http.get("error"):
         print(f"\n  {RED}✗ HTTP Error: {http['error']}{RESET}")
 
     # IPs + ASN
     if report.get("ips"):
-        _box_top("IP Addresses", BLUE)
+        _section("IP Addresses", BLUE)
         for rec in report["ips"]:
             cls = rec["classification"]
             icon = "⚠" if cls == "CDN" else "●"
             color = RED if cls == "CDN" else GREEN
             asn_str = f"AS{rec['asn']}" if rec.get("asn") else "AS?"
-            _box_line(BLUE, f"{color}{icon}{RESET} {rec['ip']:<16} {color}{asn_str:<10} {rec.get('provider', 'unknown')} [{cls}]{RESET}")
-        _box_bottom(BLUE)
+            _line(f"{color}{icon}{RESET} {rec['ip']:<16} {color}{asn_str:<10} {rec.get('provider', 'unknown')} [{cls}]{RESET}")
 
     # CNAME
     if report.get("cnames"):
-        _box_top("CNAME Chain", BLUE)
+        _section("CNAME Chain", BLUE)
         for c in report["cnames"]:
-            _box_line(BLUE, f"→ {c}")
-        _box_bottom(BLUE)
+            _line(f"→ {c}")
 
     # WAF/CDN
     if report.get("waf"):
-        _box_top("WAF/CDN Detected", RED)
+        _section("WAF/CDN Detected", RED)
         for det in report["waf"]:
             cat = det["category"]
             color = RED if cat in ("WAF", "CDN/WAF") else YELLOW
             conf_pct = f"{det['confidence']:.0%}"
-            _box_line(RED, f"{color}{det['name']:<22}{RESET} {DIM}[{cat:<10}]{RESET} conf={BOLD}{conf_pct}{RESET}")
+            _line(f"{color}{det['name']:<22}{RESET} {DIM}[{cat:<10}]{RESET} conf={BOLD}{conf_pct}{RESET}")
             if det.get("evidence"):
-                _box_line(RED, f"   {DIM}evidence: {', '.join(det['evidence'][:3])}{RESET}")
-        _box_bottom(RED)
+                _line(f"   {DIM}evidence: {', '.join(det['evidence'][:3])}{RESET}")
 
     # Error Pages
     ep = report.get("error_pages", {})
@@ -745,7 +727,7 @@ def _print_report(report):
     if ep_probes:
         successful = [p for p in ep_probes if not p.get("error")]
         if successful:
-            _box_top("Error Page Probes", YELLOW)
+            _section("Error Page Probes", YELLOW)
             for p in successful:
                 st = p.get("status", "?")
                 if st == 200: icon, color = "✓", GREEN
@@ -753,111 +735,102 @@ def _print_report(report):
                 elif isinstance(st, int) and st >= 500: icon, color = "✗", RED
                 else: icon, color = "·", DIM
                 waf_str = f"  {RED}← WAF: {', '.join(p['waf_hits'])}{RESET}" if p.get("waf_hits") else ""
-                _box_line(YELLOW, f"{color}{icon} [{st}]{RESET} {p['path']:<40} {DIM}{p['description']}{RESET}{waf_str}")
-            _box_bottom(YELLOW)
+                _line(f"{color}{icon} [{st}]{RESET} {p['path']:<40} {DIM}{p['description']}{RESET}{waf_str}")
 
     # TLS Fingerprint
     tls = report.get("tls_fingerprint", {})
     if tls and not tls.get("error"):
-        _box_top("TLS Fingerprint", MAGENTA)
-        _box_line(MAGENTA, f"Version: {tls.get('our_tls_version', '?')}")
-        _box_line(MAGENTA, f"Cipher:  {tls.get('our_cipher', '?')}")
-        _box_line(MAGENTA, f"ALPN:    {tls.get('our_alpn', 'none')}")
-        _box_line(MAGENTA, f"Ciphers: {tls.get('our_ciphers_count', '?')} offered")
+        _section("TLS Fingerprint", MAGENTA)
+        _line(f"Version: {tls.get('our_tls_version', '?')}")
+        _line(f"Cipher:  {tls.get('our_cipher', '?')}")
+        _line(f"ALPN:    {tls.get('our_alpn', 'none')}")
+        _line(f"Ciphers: {tls.get('our_ciphers_count', '?')} offered")
         for diff in tls.get("browser_differences", []):
-            _box_line(MAGENTA, f"{YELLOW}⚠ {diff}{RESET}")
+            _line(f"{YELLOW}⚠ {diff}{RESET}")
         for rec in tls.get("recommendations", []):
-            _box_line(MAGENTA, f"{CYAN}→ {rec}{RESET}")
+            _line(f"{CYAN}→ {rec}{RESET}")
         configs = tls.get("config_tests", [])
         if configs:
-            _box_line(MAGENTA, "")
-            _box_line(MAGENTA, f"{BOLD}Config Tests:{RESET}")
+            _line(f"{BOLD}Config Tests:{RESET}")
             for t in configs:
                 status_str = f"{GREEN}accepted{RESET}" if t.get("accepted") else f"{RED}rejected{RESET}"
                 if t.get("error"):
                     status_str = f"{DIM}{t['error']}{RESET}"
                 sc = f" [{t.get('status_code', '?')}]" if t.get("status_code") else ""
-                _box_line(MAGENTA, f"  {t['config']:<25} {status_str}{sc}")
-        _box_bottom(MAGENTA)
+                _line(f"  {t['config']:<25} {status_str}{sc}")
 
     # WAF Evasion
     evasion = report.get("waf_evasion", {})
     if evasion and not evasion.get("error"):
         if evasion.get("findings") or evasion.get("ua_sensitive"):
-            _box_top("WAF Evasion Analysis", RED)
+            _section("WAF Evasion Analysis", RED)
             if evasion.get("ua_tests"):
-                _box_line(RED, f"{BOLD}User-Agent Tests:{RESET}")
+                _line(f"{BOLD}User-Agent Tests:{RESET}")
                 for t in evasion["ua_tests"]:
                     if t.get("different"):
                         color = RED if t.get("status_code") in (403, 406, 429, 503) else YELLOW
-                        _box_line(RED, f"  {color}⚠ {t['ua_name']:<15} [{t.get('status_code', '?')}]{RESET} {DIM}{t['ua_string']}{RESET}")
+                        _line(f"  {color}⚠ {t['ua_name']:<15} [{t.get('status_code', '?')}]{RESET} {DIM}{t['ua_string']}{RESET}")
             if evasion.get("encoding_tests"):
                 changed = [t for t in evasion["encoding_tests"] if t.get("different")]
                 if changed:
-                    _box_line(RED, f"{BOLD}Encoding Bypass:{RESET}")
+                    _line(f"{BOLD}Encoding Bypass:{RESET}")
                     for t in changed:
-                        _box_line(RED, f"  {YELLOW}⚠ {t['name']:<25}{RESET} {t['path']:<15} [{t.get('status_code', '?')}]")
+                        _line(f"  {YELLOW}⚠ {t['name']:<25}{RESET} {t['path']:<15} [{t.get('status_code', '?')}]")
             for finding in evasion.get("findings", []):
-                _box_line(RED, f"{RED}✗ {finding}{RESET}")
+                _line(f"{RED}✗ {finding}{RESET}")
             for rec in evasion.get("evasion_recommendations", []):
-                _box_line(RED, f"{CYAN}→ {rec}{RESET}")
-            _box_bottom(RED)
+                _line(f"{CYAN}→ {rec}{RESET}")
 
     # Proxy Effectiveness
     proxy_eff = report.get("proxy_effectiveness", {})
     if proxy_eff.get("proxy_results"):
-        _box_top("Proxy Effectiveness", BLUE)
+        _section("Proxy Effectiveness", BLUE)
         bl = proxy_eff.get("baseline", {})
         if bl and not bl.get("error"):
-            _box_line(BLUE, f"Baseline: [{bl.get('status_code', '?')}] hash={bl.get('body_hash', '?')}")
+            _line(f"Baseline: [{bl.get('status_code', '?')}] hash={bl.get('body_hash', '?')}")
         for pr in proxy_eff["proxy_results"]:
             icon = "✓" if pr.get("status_changed") else "·"
             color = GREEN if pr.get("status_changed") else DIM
             err = f" {RED}error: {pr['error']}{RESET}" if pr.get("error") else ""
-            _box_line(BLUE, f"{color}{icon} {pr['proxy']:<38} [{pr.get('status_code', '?')}] hash={pr.get('body_hash', '?')}{RESET}{err}")
+            _line(f"{color}{icon} {pr['proxy']:<38} [{pr.get('status_code', '?')}] hash={pr.get('body_hash', '?')}{RESET}{err}")
         for f in proxy_eff.get("findings", []):
-            _box_line(BLUE, f"{YELLOW}⚠ {f}{RESET}")
-        _box_bottom(BLUE)
+            _line(f"{YELLOW}⚠ {f}{RESET}")
 
     # SSL Cert
     if report.get("cert_info"):
         cert = report["cert_info"]
-        _box_top("SSL Certificate", GREEN)
-        _box_line(GREEN, f"CN:     {cert.get('common_name', '?')}")
-        _box_line(GREEN, f"Issuer: {cert.get('issuer', '?')}")
+        _section("SSL Certificate", GREEN)
+        _line(f"CN:     {cert.get('common_name', '?')}")
+        _line(f"Issuer: {cert.get('issuer', '?')}")
         if cert.get("is_cdn_issued"):
-            _box_line(GREEN, f"{YELLOW}⚠ Certificate issued by CDN provider{RESET}")
-        _box_bottom(GREEN)
+            _line(f"{YELLOW}⚠ Certificate issued by CDN provider{RESET}")
 
     # Origin candidates
     if report.get("origin_candidates"):
-        _box_top("Potential Origin IPs (subdomain leakage)", GREEN)
+        _section("Potential Origin IPs (subdomain leakage)", GREEN)
         for c in report["origin_candidates"]:
             asn_str = c["asn_info"].get("provider", "") if c.get("asn_info") else ""
-            _box_line(GREEN, f"{GREEN}●{RESET} {c['ip']:<16} via {c['source']:<30} {DIM}{asn_str}{RESET}")
-        _box_bottom(GREEN)
+            _line(f"{GREEN}●{RESET} {c['ip']:<16} via {c['source']:<30} {DIM}{asn_str}{RESET}")
 
     # WAF Bypass
     bypass = report.get("waf_bypass", {})
     if bypass.get("findings"):
-        _box_top("WAF Bypass Testing", RED)
+        _section("WAF Bypass Testing", RED)
         bl = bypass.get("baseline", {})
         if bl and not bl.get("error"):
-            _box_line(RED, f"Baseline: [{bl.get('status_code', '?')}] hash={bl.get('body_hash', '?')}")
+            _line(f"Baseline: [{bl.get('status_code', '?')}] hash={bl.get('body_hash', '?')}")
         for f in bypass["findings"]:
             sev = f.get("severity", "info")
             color = f"{BOLD}{RED}" if sev == "critical" else RED if sev == "high" else YELLOW
-            _box_line(RED, "")
-            _box_line(RED, f"{color}[{sev.upper()}]{RESET} {f['detail']}")
+            _line(f"{color}[{sev.upper()}]{RESET} {f['detail']}")
             if f.get("curl"):
-                _box_line(RED, f"{BOLD}PoC:{RESET}")
-                for line in f["curl"].split("\n"):
-                    _box_line(RED, f"  {CYAN}{line}{RESET}")
+                _line(f"{BOLD}PoC:{RESET}")
+                for ln in f["curl"].split("\n"):
+                    _line(f"  {CYAN}{ln}{RESET}")
             if f.get("curl_resolve"):
-                _box_line(RED, f"{BOLD}PoC (--resolve):{RESET}")
-                for line in f["curl_resolve"].split("\n"):
-                    _box_line(RED, f"  {CYAN}{line}{RESET}")
-        _box_bottom(RED)
+                _line(f"{BOLD}PoC (--resolve):{RESET}")
+                for ln in f["curl_resolve"].split("\n"):
+                    _line(f"  {CYAN}{ln}{RESET}")
     elif bypass.get("ip_tests"):
         accessible = [t for t in bypass["ip_tests"] if t.get("accessible")]
         if not accessible:
@@ -865,10 +838,9 @@ def _print_report(report):
 
     # Historical
     if report.get("historical_ips"):
-        _box_top("Historical DNS", DIM)
+        _section("Historical DNS", DIM)
         for rec in report["historical_ips"][:10]:
-            _box_line(DIM, f"{rec['ip']:<16} {rec['owner']:<30} last_seen={rec['last_seen']}")
-        _box_bottom(DIM)
+            _line(f"{rec['ip']:<16} {rec['owner']:<30} last_seen={rec['last_seen']}")
 
     print()
 

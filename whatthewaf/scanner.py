@@ -334,13 +334,31 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
         cookies = set_cookies if set_cookies else [f"{k}={v}" for k, v in resp.cookies.items()]
         body = _smart_body_cap(resp.text)
 
+        # Extract title from HTML
+        import re
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', body, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else None
+
+        # Pick interesting headers
+        interesting = [
+            "server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+            "x-frame-options", "x-content-type-options", "x-xss-protection",
+            "content-security-policy", "strict-transport-security",
+            "access-control-allow-origin", "www-authenticate",
+            "x-default-vhost", "x-cache", "x-cdn", "cf-ray",
+            "x-request-id", "x-correlation-id", "remote-addr",
+        ]
+        notable_headers = {k: v for k, v in headers.items() if k.lower() in interesting}
+
         report["direct_https"] = {
             "status": resp.status_code,
             "server": headers.get("server", headers.get("Server", "")),
             "headers": headers,
+            "notable_headers": notable_headers,
+            "title": page_title,
             "body_hash": hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16],
             "body_length": len(body),
-            "body_preview": body[:500],
+            "content_type": headers.get("content-type", ""),
         }
         report["waf_direct"] = waf_signatures.detect_waf(headers, cookies, body, resp.status_code)
     except Exception as e:
