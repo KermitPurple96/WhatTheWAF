@@ -116,22 +116,33 @@ wtw example.com --only evasion
 ### Direct IP Bypass PoC
 
 ```
---direct-ip IP           Connect directly to IP bypassing DNS/CDN
+--direct-ip IP           Single IP, comma-separated IPs, or 'auto'
+--path PATH              Path to test (default: /)
 ```
 
-Connects to the specified IP with the `Host` header set to the target domain, bypassing DNS resolution and any CDN/WAF in front. Compares the direct response against the normal CDN response to confirm if the WAF can be bypassed.
+Connects to the specified IP with the `Host` header set to the target domain, bypassing DNS resolution and any CDN/WAF in front. Compares body hashes between CDN and direct response to confirm bypass.
 
-The output shows:
-
-- DNS resolution (CDN IPs) vs direct IP ASN
-- Side-by-side response comparison (status, server, body hash)
-- WAF signature comparison (present via CDN vs absent on direct)
-- Whether bypass is confirmed
-- Curl commands to reproduce
+Determination logic:
+- **Same hash** + DNS via WAF → `WAF BYPASS CONFIRMED`
+- **Same hash** + DNS without WAF → `DIRECT ACCESS CONFIRMED`
+- **Different hash** + default vhost detected → `DEFAULT VHOST` (not a bypass)
+- **Different hash** + real content → `WAF BYPASS LIKELY` / `DIRECT ACCESS`
 
 ```bash
-# Test if origin is directly accessible
+# Single IP
 wtw example.com --direct-ip 203.0.113.50
+
+# Multiple IPs (comma-separated)
+wtw example.com --direct-ip 203.0.113.50,203.0.113.51,10.0.0.5
+
+# Auto-discover origin IPs (subdomain leakage + historical DNS) and test all
+wtw example.com --direct-ip auto
+
+# Test specific path
+wtw example.com --direct-ip 203.0.113.50 --path /login
+
+# Combine: auto-discover + specific path
+wtw example.com --direct-ip auto --path /api/v1/health
 
 # Save PoC as JSON
 wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
@@ -216,14 +227,18 @@ cat subs.txt | wtw --stdin -m origins
 ### WAF Bypass Testing
 
 ```bash
-# Find origin IPs via subdomain leakage
-wtw example.com --only ips,subs
+# Auto-discover and test all origin IPs
+wtw example.com --direct-ip auto
 
-# Test direct IP access (bypass CDN/WAF)
+# Test specific IPs
+wtw example.com --direct-ip 203.0.113.50,10.0.0.5
+
+# Test specific path (login page, API, etc.)
+wtw example.com --direct-ip auto --path /login
+
+# Manual: find origin IPs first, then test
+wtw example.com --only ips,subs,history
 wtw example.com --direct-ip 203.0.113.50
-
-# Historical DNS to find old origin IPs
-wtw example.com --only history
 ```
 
 ### Pentest Workflow with ProtonVPN

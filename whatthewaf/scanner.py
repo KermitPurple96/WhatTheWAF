@@ -253,7 +253,7 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     return report
 
 
-def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
+def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path="/"):
     """Connect directly to an IP with Host header set to domain — WAF bypass PoC.
 
     This bypasses DNS resolution entirely, connecting to the IP and sending
@@ -266,7 +266,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
     ua = user_agent or DEFAULT_UA
     domain = dns_resolver._clean_domain(domain)
     report = {
-        "target": domain, "ip": ip, "mode": "direct-ip",
+        "target": domain, "ip": ip, "path": path, "mode": "direct-ip",
         "dns_resolution": {}, "direct_http": {}, "direct_https": {},
         "comparison": {}, "waf_via_cdn": [], "waf_direct": [],
         "bypass_confirmed": False, "summary": "",
@@ -298,7 +298,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
 
     # 2. Fetch via CDN (normal resolution)
     status("http", f"Fetching https://{domain} via CDN")
-    cdn_resp = fetch_response(f"https://{domain}", timeout=timeout, user_agent=ua)
+    cdn_resp = fetch_response(f"https://{domain}{path}", timeout=timeout, user_agent=ua)
     if "error" not in cdn_resp:
         report["cdn_response"] = {
             "status": cdn_resp["status"],
@@ -332,7 +332,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
         httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect
         try:
             with httpx.Client(**client_kwargs) as client:
-                resp = client.get(f"https://{domain}/")
+                resp = client.get(f"https://{domain}{path}")
         finally:
             httpcore._backends.sync.SyncBackend.connect_tcp = original_create_connection
         headers = dict(resp.headers)
@@ -387,7 +387,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None):
         httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect2
         try:
             with httpx.Client(**client_kwargs) as client:
-                resp = client.get(f"http://{domain}/")
+                resp = client.get(f"http://{domain}{path}")
         finally:
             httpcore._backends.sync.SyncBackend.connect_tcp = original_create_connection2
         headers = dict(resp.headers)

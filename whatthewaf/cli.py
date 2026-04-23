@@ -34,7 +34,9 @@ def main():
   whatthewaf example.com
   whatthewaf example.com --only waf
   whatthewaf example.com --only ips,waf,errors
-  whatthewaf example.com --direct-ip 1.2.3.4
+  whatthewaf example.com --direct-ip 1.2.3.4,5.6.7.8
+  whatthewaf example.com --direct-ip auto
+  whatthewaf example.com --direct-ip 1.2.3.4 --path /login
   whatthewaf example.com --evasion
   whatthewaf example.com --proton --evasion
   whatthewaf -l domains.txt -m origins
@@ -50,7 +52,9 @@ def main():
     parser.add_argument("--only", metavar="MODULES",
                         help="Run only specific modules (comma-separated): ips, waf, errors, tls, evasion, bypass, cert, subs, history, proxy")
     parser.add_argument("--direct-ip", metavar="IP",
-                        help="Connect directly to IP (bypassing DNS/CDN) with Host header — WAF bypass PoC")
+                        help="IP(s) to connect directly (comma-separated), or 'auto' to discover and test origin IPs")
+    parser.add_argument("--path", metavar="PATH", default="/",
+                        help="Path to test in direct-ip mode (default: /)")
     parser.add_argument("--no-subs", action="store_true", help="Skip subdomain leakage scan")
     parser.add_argument("--no-cert", action="store_true", help="Skip SSL certificate check")
     parser.add_argument("--no-tls", action="store_true", help="Skip TLS fingerprint analysis")
@@ -481,25 +485,88 @@ def _run_origins(targets, args):
 
 def _run_direct_ip(targets, args):
     """Run direct IP bypass PoC."""
+    from .modules import dns_resolver, asn_lookup, origin_finder
+
     is_json = args.json
     status_cb = _make_status_callback(quiet=is_json)
     reports = []
+    path = args.path if args.path.startswith("/") else f"/{args.path}"
 
     for target in targets:
-        print(f"{CYAN}[*] Direct IP bypass test: {target} → {args.direct_ip}{RESET}", file=sys.stderr)
-        try:
-            report = direct_ip_scan(
-                target, args.direct_ip, timeout=args.timeout,
-                user_agent=args.user_agent, on_status=status_cb,
-            )
+        domain = dns_resolver._clean_domain(target)
+
+        if args.direct_ip == "auto":
+            # Auto-discover origin IPs and test each
+            print(f"{CYAN}[*] Auto-discovering origin IPs for {domain}...{RESET}", file=sys.stderr)
+
+            # Resolve DNS to find CDN IPs
+            dns_info = dns_resolver.resolve_domain(domain)
+            a_records = dns_info.get("a_records", [])
+            cdn_ips = set()
+            if a_records:
+                asn_records = asn_lookup.lookup_asn_bulk(a_records)
+                cdn_ips = {r["ip"] for r in asn_records if r["classification"] == "CDN"}
+
+            # Discover origin candidates via subdomains
+            candidates = []
+            if cdn_ips:
+                status_cb("origins", "Subdomain origin leakage scan")
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                found = origin_finder.find_origins(domain, cdn_ips=cdn_ips)
+                candidates.extend([c for c in found if not c.get("is_cdn")])
+
+            # Historical DNS
+            status_cb("history", "Historical DNS lookup")
             sys.stderr.write("\r\033[K"); sys.stderr.flush()
-            reports.append(report)
-            if not is_json:
-                _print_direct_ip_report(report)
-        except Exception as e:
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
-            print(f"{RED}[!] Error: {target}: {e}{RESET}", file=sys.stderr)
-            reports.append({"target": target, "error": str(e)})
+            historical = origin_finder.fetch_historical_ips(domain)
+
+            # Collect unique IPs
+            seen_ips = set()
+            test_ips = []
+            for c in candidates:
+                if c["ip"] not in seen_ips and c["ip"] not in cdn_ips:
+                    seen_ips.add(c["ip"])
+                    test_ips.append({"ip": c["ip"], "source": c.get("source", "subdomain")})
+            for h in historical:
+                if h["ip"] not in seen_ips and h["ip"] not in cdn_ips:
+                    seen_ips.add(h["ip"])
+                    test_ips.append({"ip": h["ip"], "source": f"historical ({h.get('last_seen', '?')})"})
+
+            if not test_ips:
+                print(f"{YELLOW}[!] No origin IP candidates found for {domain}{RESET}", file=sys.stderr)
+                continue
+
+            print(f"{GREEN}[+] Found {len(test_ips)} candidate IP(s) for {domain}:{RESET}", file=sys.stderr)
+            for t in test_ips:
+                print(f"    {t['ip']:<16} via {t['source']}", file=sys.stderr)
+            print(file=sys.stderr)
+
+            ips = [t["ip"] for t in test_ips]
+        else:
+            # Comma-separated IPs
+            ips = [ip.strip() for ip in args.direct_ip.split(",") if ip.strip()]
+
+        # Test each IP
+        for ip in ips:
+            print(f"{CYAN}[*] Testing {domain} → {ip} (path: {path}){RESET}", file=sys.stderr)
+            try:
+                report = direct_ip_scan(
+                    target, ip, timeout=args.timeout,
+                    user_agent=args.user_agent, on_status=status_cb,
+                    path=path,
+                )
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                reports.append(report)
+                if not is_json:
+                    _print_direct_ip_report(report)
+            except Exception as e:
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                print(f"{RED}[!] Error: {target} → {ip}: {e}{RESET}", file=sys.stderr)
+                reports.append({"target": target, "ip": ip, "error": str(e)})
+
+    # Print summary table if multiple IPs tested
+    if not is_json and len(reports) > 1:
+        _print_direct_ip_summary(reports)
 
     if is_json:
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
@@ -507,17 +574,53 @@ def _run_direct_ip(targets, args):
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
 
 
+def _print_direct_ip_summary(reports):
+    """Print summary table when multiple IPs were tested."""
+    print(f"\n{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}{CYAN}  Summary: {len(reports)} IP(s) tested{RESET}")
+    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    for r in reports:
+        if r.get("error"):
+            print(f"  {RED}✗{RESET} {r.get('ip', '?'):<16} Error: {r['error'][:40]}")
+            continue
+        ip = r.get("ip", "?")
+        status = r.get("direct_https", {}).get("status", "?")
+        match = r.get("hash_match", False)
+        bypassed = r.get("bypass_confirmed", False)
+        summary = r.get("summary", "")
+
+        if bypassed and match:
+            icon, color = "●", RED
+        elif bypassed:
+            icon, color = "◐", YELLOW
+        elif r.get("default_vhost"):
+            icon, color = "○", DIM
+        else:
+            icon, color = "○", GREEN
+
+        label = summary.split("—")[0].strip() if "—" in summary else summary[:30]
+        print(f"  {color}{icon}{RESET} {ip:<16} [{status}] {color}{label}{RESET}")
+    print()
+
+
 def _print_direct_ip_report(report):
     domain = report["target"]
     ip = report["ip"]
+    path = report.get("path", "/")
     bypassed = report.get("bypass_confirmed", False)
 
-    W = max(len(domain) + 16, 50)
-    title_pad = W - len(domain) - 14
+    title = f"{domain} → {ip}"
+    if path != "/":
+        title += f" (path: {path})"
+    W = max(len(title) + 6, 50)
+    title_pad = W - len(title) - 4
     print(f"\n{BOLD}{CYAN}╔{'═' * W}╗{RESET}")
-    print(f"{BOLD}{CYAN}║  Bypass PoC: {domain}{' ' * max(title_pad, 1)}║{RESET}")
+    print(f"{BOLD}{CYAN}║  {title}{' ' * max(title_pad, 1)}║{RESET}")
     print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
-    print(f"  Target: {BOLD}{domain}{RESET}  →  IP: {BOLD}{ip}{RESET}")
+    target_line = f"  Target: {BOLD}{domain}{RESET}  →  IP: {BOLD}{ip}{RESET}"
+    if path != "/":
+        target_line += f"  Path: {BOLD}{path}{RESET}"
+    print(target_line)
 
     # Summary
     summary = report['summary']
@@ -660,8 +763,8 @@ def _print_direct_ip_report(report):
 
     # PoC curl command
     _section("Reproduce", BOLD)
-    _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}/{RESET}")
-    _line(f"{CYAN}curl -sk --resolve {domain}:443:{ip} https://{domain}/{RESET}")
+    _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}{path}{RESET}")
+    _line(f"{CYAN}curl -sk --resolve {domain}:443:{ip} https://{domain}{path}{RESET}")
     print()
 
 
