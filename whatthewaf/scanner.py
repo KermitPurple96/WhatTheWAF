@@ -253,6 +253,19 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
     return report
 
 
+def _is_related_domain(new_domain, original_domain):
+    """Check if new_domain is a sibling/sub of original_domain (share base domain)."""
+    if new_domain == original_domain:
+        return True
+    # Strip first label to get base: admin.pro.gms.stratio.com -> pro.gms.stratio.com
+    parts = original_domain.split(".")
+    if len(parts) > 2:
+        base = ".".join(parts[1:])
+    else:
+        base = original_domain
+    return new_domain.endswith("." + base) or new_domain == base
+
+
 def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path="/"):
     """Connect directly to an IP with Host header set to domain — WAF bypass PoC.
 
@@ -317,22 +330,46 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
     # Use httpx transport with custom DNS to resolve domain → IP directly
     # This is equivalent to curl --resolve domain:443:ip https://domain/
     status("bypass", f"Direct HTTPS connection to {ip} with Host: {domain}")
+    pinned_domains_https = {domain}
+    redirect_chain = []
     try:
         import httpcore
+        from urllib.parse import urlparse
         client_kwargs = {
-            "timeout": timeout, "follow_redirects": True, "verify": False,
+            "timeout": timeout, "follow_redirects": False, "verify": False,
             "headers": {"User-Agent": ua},
         }
-        # Override DNS: make domain resolve to our target IP
+        # Override DNS: pin target domain and any related domains encountered during redirects
         original_create_connection = httpcore._backends.sync.SyncBackend.connect_tcp
         def _patched_connect(self, host, port, **kwargs):
-            if str(host) == domain:
+            host_str = str(host)
+            if _is_related_domain(host_str, domain):
+                pinned_domains_https.add(host_str)
                 host = ip
             return original_create_connection(self, host, port, **kwargs)
         httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect
         try:
             with httpx.Client(**client_kwargs) as client:
-                resp = client.get(f"https://{domain}{path}")
+                url = f"https://{domain}{path}"
+                max_redirects = 20
+                for _ in range(max_redirects):
+                    resp = client.get(url)
+                    redirect_chain.append({
+                        "url": url,
+                        "status": resp.status_code,
+                        "location": resp.headers.get("location", ""),
+                    })
+                    if resp.status_code not in (301, 302, 303, 307, 308):
+                        break
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        break
+                    # Resolve relative redirects
+                    if location.startswith("/"):
+                        parsed = urlparse(url)
+                        url = f"{parsed.scheme}://{parsed.netloc}{location}"
+                    else:
+                        url = location
         finally:
             httpcore._backends.sync.SyncBackend.connect_tcp = original_create_connection
         headers = dict(resp.headers)
@@ -381,7 +418,9 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
         # Same DNS override trick for HTTP
         original_create_connection2 = httpcore._backends.sync.SyncBackend.connect_tcp
         def _patched_connect2(self, host, port, **kwargs):
-            if str(host) == domain:
+            host_str = str(host)
+            if _is_related_domain(host_str, domain):
+                pinned_domains_https.add(host_str)
                 host = ip
             return original_create_connection2(self, host, port, **kwargs)
         httpcore._backends.sync.SyncBackend.connect_tcp = _patched_connect2
@@ -402,6 +441,10 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
         }
     except Exception as e:
         report["direct_http"] = {"error": str(e)}
+
+    # Record which domains were pinned to the IP during redirect following
+    report["pinned_domains"] = sorted(pinned_domains_https)
+    report["redirect_chain"] = redirect_chain
 
     # 5. Compare and determine bypass
     cdn_status = report.get("cdn_response", {}).get("status")

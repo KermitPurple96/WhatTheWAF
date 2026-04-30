@@ -499,13 +499,41 @@ def _run_direct_ip(targets, args):
             # Auto-discover origin IPs and test each
             print(f"{CYAN}[*] Auto-discovering origin IPs for {domain}...{RESET}", file=sys.stderr)
 
-            # Resolve DNS to find CDN IPs
+            # Resolve DNS A records
             dns_info = dns_resolver.resolve_domain(domain)
             a_records = dns_info.get("a_records", [])
+            asn_records = []
             cdn_ips = set()
             if a_records:
                 asn_records = asn_lookup.lookup_asn_bulk(a_records)
                 cdn_ips = {r["ip"] for r in asn_records if r["classification"] == "CDN"}
+
+            # Separate true CDN/WAF proxies from cloud hosting
+            # True CDN/WAF (Cloudflare, Akamai, etc.) — IPs are proxy edges, not origins
+            true_cdn_keywords = {
+                "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
+                "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
+                "stackpath", "cdn77", "bunny", "gcore",
+            }
+            true_cdn_ips = set()
+            hosting_ips = set()
+            for r in asn_records:
+                provider_lower = r.get("provider", "").lower()
+                if any(kw in provider_lower for kw in true_cdn_keywords):
+                    true_cdn_ips.add(r["ip"])
+                else:
+                    hosting_ips.add(r["ip"])
+
+            # Collect unique IPs to test
+            seen_ips = set()
+            test_ips = []
+
+            # Always include DNS A records that are hosting/cloud (AWS, Google, Azure, etc.)
+            # These are likely direct origins, not proxy edges
+            for r in asn_records:
+                if r["ip"] not in seen_ips and r["ip"] not in true_cdn_ips:
+                    seen_ips.add(r["ip"])
+                    test_ips.append({"ip": r["ip"], "source": f"DNS A record ({r.get('provider', '?')})"})
 
             # Discover origin candidates via subdomains
             candidates = []
@@ -515,20 +543,18 @@ def _run_direct_ip(targets, args):
                 found = origin_finder.find_origins(domain, cdn_ips=cdn_ips)
                 candidates.extend([c for c in found if not c.get("is_cdn")])
 
+            for c in candidates:
+                if c["ip"] not in seen_ips:
+                    seen_ips.add(c["ip"])
+                    test_ips.append({"ip": c["ip"], "source": c.get("source", "subdomain")})
+
             # Historical DNS
             status_cb("history", "Historical DNS lookup")
             sys.stderr.write("\r\033[K"); sys.stderr.flush()
             historical = origin_finder.fetch_historical_ips(domain)
 
-            # Collect unique IPs
-            seen_ips = set()
-            test_ips = []
-            for c in candidates:
-                if c["ip"] not in seen_ips and c["ip"] not in cdn_ips:
-                    seen_ips.add(c["ip"])
-                    test_ips.append({"ip": c["ip"], "source": c.get("source", "subdomain")})
             for h in historical:
-                if h["ip"] not in seen_ips and h["ip"] not in cdn_ips:
+                if h["ip"] not in seen_ips:
                     seen_ips.add(h["ip"])
                     test_ips.append({"ip": h["ip"], "source": f"historical ({h.get('last_seen', '?')})"})
 
@@ -642,6 +668,26 @@ def _print_direct_ip_report(report):
             print(f"  {GREEN}✓ Hash match: {cdn_hash} (CDN) == {direct_hash_val} (direct){RESET}")
         else:
             print(f"  {YELLOW}✗ Hash mismatch: {cdn_hash} (CDN) != {direct_hash_val} (direct){RESET}")
+
+    # Redirect chain (shows exactly why each domain was pinned)
+    chain = report.get("redirect_chain", [])
+    pinned = report.get("pinned_domains", [])
+    if chain and len(chain) > 1:
+        _section("Redirect Chain (direct → IP)", CYAN)
+        for i, step in enumerate(chain):
+            status_code = step.get("status", "?")
+            url = step.get("url", "?")
+            if status_code in (301, 302, 303, 307, 308):
+                _line(f"{DIM}[{status_code}]{RESET} {url}")
+                if step.get("location"):
+                    _line(f"     {YELLOW}→ {step['location']}{RESET}")
+            else:
+                _line(f"{GREEN}[{status_code}]{RESET} {url}")
+    if len(pinned) > 1:
+        _section("Pinned Domains (resolved → IP)", CYAN)
+        for d in pinned:
+            marker = f"{GREEN}●{RESET}" if d == domain else f"{YELLOW}→{RESET}"
+            _line(f"{marker} {d}  →  {ip}")
 
     # DNS resolution info (only ASN records, no duplicate raw IPs)
     dns = report.get("dns_resolution", {})
@@ -762,9 +808,14 @@ def _print_direct_ip_report(report):
                 _line(f"{DIM}... ({len(lines) - 60} more lines){RESET}")
 
     # PoC curl command
+    pinned = report.get("pinned_domains", [domain])
     _section("Reproduce", BOLD)
-    _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}{path}{RESET}")
-    _line(f"{CYAN}curl -sk --resolve {domain}:443:{ip} https://{domain}{path}{RESET}")
+    if len(pinned) <= 1:
+        _line(f"{CYAN}curl -sk -H 'Host: {domain}' https://{ip}{path}{RESET}")
+        _line(f"{CYAN}curl -skL --resolve {domain}:443:{ip} https://{domain}{path}{RESET}")
+    else:
+        resolve_args = " ".join(f"--resolve {d}:443:{ip}" for d in pinned)
+        _line(f"{CYAN}curl -skL {resolve_args} https://{domain}{path}{RESET}")
     print()
 
 
