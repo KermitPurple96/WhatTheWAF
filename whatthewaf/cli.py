@@ -28,19 +28,21 @@ def _load_banner():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="WhatTheWAF - WAF/CDN Detection, Bypass, and TLS Fingerprint Evasion",
+        description="WhatTheWAF - WAF/CDN Detection, Bypass, TLS Fingerprint Evasion & WAF Vulnerability Scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   whatthewaf example.com
   whatthewaf example.com --only waf
-  whatthewaf example.com --only ips,waf,errors
   whatthewaf example.com --direct-ip 1.2.3.4,5.6.7.8
   whatthewaf example.com --direct-ip auto
-  whatthewaf example.com --direct-ip 1.2.3.4 --path /login
   whatthewaf example.com --evasion
-  whatthewaf example.com --proton --evasion
-  whatthewaf -l domains.txt -m origins
-  whatthewaf example.com --proxy-chain socks5://proxy1:1080,http://proxy2:8080
+  whatthewaf example.com --waf-scan
+  whatthewaf example.com --waf-scan --waf-scan-layers ruleengine,evasion
+  whatthewaf example.com --cf-inject
+  whatthewaf example.com --tor --tls-rotate --source-port rotating
+  whatthewaf --proxy-mode --proton --tls-rotate --h2-rotate
+  whatthewaf --mitm --tor --tls-rotate --source-port rotating
+  whatthewaf example.com --proxy-pool proxies.txt
   cat subs.txt | whatthewaf --stdin -m origins""",
     )
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
@@ -100,6 +102,35 @@ def main():
                         help="Check ProtonVPN status, connectivity, and IP rotation capability")
     parser.add_argument("--proton-rotate", action="store_true",
                         help="Rotate ProtonVPN IP (disconnect + reconnect to new server)")
+    # New evasion modules
+    parser.add_argument("--tor", action="store_true",
+                        help="Use Tor for IP rotation (auto-detects running instances)")
+    parser.add_argument("--tor-password", metavar="PASS", default="",
+                        help="Tor control port password for IP rotation")
+    parser.add_argument("--cf-inject", action="store_true",
+                        help="Test Cloudflare header injection bypass (CF-Connecting-IP, CF-Ray, etc.)")
+    parser.add_argument("--source-port", metavar="PROFILE",
+                        choices=["trusted", "browser_linux", "browser_windows", "scanner_evasion", "rotating"],
+                        help="Manipulate TCP source port per request")
+    parser.add_argument("--tls-rotate", action="store_true",
+                        help="Rotate TLS fingerprint per request (requires tls-client)")
+    parser.add_argument("--h2-rotate", action="store_true",
+                        help="Rotate HTTP/2 SETTINGS fingerprint per request")
+    parser.add_argument("--tcp-options", metavar="PROFILE",
+                        choices=["chrome", "firefox", "safari", "edge", "windows10", "linux", "random"],
+                        help="Set TCP SYN options to match browser profile (requires scapy + root)")
+    parser.add_argument("--waf-scan", action="store_true",
+                        help="Run deep WAF vulnerability scanner (10 layers)")
+    parser.add_argument("--waf-scan-layers", metavar="LAYERS",
+                        help="Scan specific layers (comma-separated): network,ruleengine,ratelimit,evasion,behavioural,header,tls,method,session,misconfig")
+    parser.add_argument("--mitm", action="store_true",
+                        help="Start MITM proxy with dynamic cert generation (full HTTPS interception)")
+    parser.add_argument("--auto-retry", action="store_true",
+                        help="Auto-retry with different techniques when WAF blocks (403/429/503)")
+    parser.add_argument("--proxy-pool", metavar="FILE",
+                        help="File with proxy URLs (one per line) for IP rotation pool")
+    parser.add_argument("--tui", action="store_true",
+                        help="Show real-time TUI dashboard (requires urwid)")
     parser.add_argument("--no-banner", action="store_true")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
 
@@ -142,12 +173,19 @@ def main():
     if args.solve_challenge:
         _run_solve_challenge(args)
         return
+    if args.mitm:
+        _run_mitm_proxy(args)
+        return
 
     targets = _collect_targets(args)
     if not targets:
         parser.error("No targets specified.")
 
-    if args.direct_ip:
+    if args.waf_scan:
+        _run_waf_scan(targets, args)
+    elif args.cf_inject:
+        _run_cf_inject(targets, args)
+    elif args.direct_ip:
         _run_direct_ip(targets, args)
     elif args.mode == "origins":
         _run_origins(targets, args)
@@ -169,6 +207,46 @@ def _run_stealth_status():
     print(f"    Status: {GREEN + 'Ready' + RESET if proton_ok else RED + 'Not available' + RESET}")
     if proton.get("exit_ip"):
         print(f"    Exit IP: {proton['exit_ip']} ({proton.get('country', '?')})")
+
+    # Tor
+    try:
+        from .modules.tor_rotator import TorRotator
+        tr = TorRotator()
+        tor_count = len(tr._alive_proxies)
+        print(f"\n  {BOLD}IP Rotation (Tor):{RESET}")
+        if tor_count > 0:
+            print(f"    Status: {GREEN}{tor_count} instance(s) detected{RESET}")
+        else:
+            print(f"    Status: {RED}No Tor instances found{RESET}")
+        print(f"    Use: {CYAN}whatthewaf --tor{RESET}")
+    except Exception:
+        print(f"\n  {BOLD}IP Rotation (Tor):{RESET}")
+        print(f"    Status: {RED}Not available{RESET}")
+
+    # TLS Rotation (tls-client)
+    try:
+        from .modules.tls_rotator import TLSRotator
+        tls_ok = TLSRotator.is_available()
+        print(f"\n  {BOLD}TLS Fingerprint Rotation (tls-client):{RESET}")
+        print(f"    Status: {GREEN + 'Ready' + RESET if tls_ok else YELLOW + 'Fallback mode (pip install tls-client)' + RESET}")
+        print(f"    Use: {CYAN}whatthewaf --tls-rotate{RESET}")
+    except Exception:
+        pass
+
+    # TCP Options (Scapy)
+    try:
+        from .modules.tcp_options import TCPOptionsManipulator
+        tcp_opt = TCPOptionsManipulator()
+        print(f"\n  {BOLD}TCP SYN Options (Scapy):{RESET}")
+        print(f"    Scapy: {GREEN + 'Available' + RESET if tcp_opt.is_available() else RED + 'Not available (pip install scapy)' + RESET}")
+        print(f"    Use: {CYAN}whatthewaf --tcp-options chrome{RESET}")
+    except Exception:
+        pass
+
+    # Source Port
+    print(f"\n  {BOLD}Source Port Manipulation:{RESET}")
+    print(f"    Status: {GREEN}Available{RESET}")
+    print(f"    Use: {CYAN}whatthewaf --source-port rotating{RESET}")
 
     # curl-impersonate
     print(f"\n  {BOLD}HTTP/2 Fingerprint (curl-impersonate):{RESET}")
@@ -194,13 +272,29 @@ def _run_stealth_status():
     if not pw_installed:
         print(f"    Install: {CYAN}whatthewaf --install-playwright{RESET}")
 
-    # TLS (always available via proxy mode)
-    print(f"\n  {BOLD}TLS Fingerprint (JA3 evasion):{RESET}")
-    print(f"    Status: {GREEN}Available via --proxy-mode{RESET}")
+    # MITM Proxy
+    print(f"\n  {BOLD}MITM Proxy (HTTPS interception):{RESET}")
+    print(f"    Status: {GREEN}Available{RESET}")
+    print(f"    Use: {CYAN}whatthewaf --mitm --listen-port 8888{RESET}")
+
+    # WAF Scanner
+    print(f"\n  {BOLD}WAF Vulnerability Scanner:{RESET}")
+    print(f"    Status: {GREEN}Available (10 layers){RESET}")
+    print(f"    Use: {CYAN}whatthewaf example.com --waf-scan{RESET}")
+
+    # TUI
+    try:
+        from .modules.tui_dashboard import WAFDashboard
+        tui_ok = WAFDashboard.is_available()
+        print(f"\n  {BOLD}TUI Dashboard:{RESET}")
+        print(f"    Status: {GREEN + 'Available' + RESET if tui_ok else YELLOW + 'Fallback (pip install urwid)' + RESET}")
+    except Exception:
+        pass
 
     print(f"\n{'=' * 60}")
     print(f"  {BOLD}Full stealth command:{RESET}")
-    print(f"    {CYAN}whatthewaf --proxy-mode --proton --random-delay 2{RESET}")
+    print(f"    {CYAN}whatthewaf --proxy-mode --proton --tls-rotate --source-port rotating --random-delay 2{RESET}")
+    print(f"    or {CYAN}whatthewaf --mitm --tor --tls-rotate --h2-rotate{RESET}")
     print(f"    + {CYAN}whatthewaf --tcp-profile windows{RESET} (in another terminal)")
     print()
 
@@ -339,6 +433,130 @@ def _run_proxy_mode(args):
         random_delay=args.random_delay,
         verbose=args.proxy_verbose,
     )
+
+
+def _run_mitm_proxy(args):
+    """Start MITM proxy with dynamic cert generation."""
+    from .modules.mitm_proxy import MITMProxy
+
+    proxy = MITMProxy(
+        listen_host="127.0.0.1",
+        listen_port=args.listen_port,
+        upstream_proxy=args.proxy,
+        use_proton=args.proton,
+        spoof_ua=not args.no_spoof_ua,
+        spoof_tls=not args.no_spoof_tls,
+        verbose=args.proxy_verbose,
+    )
+    proxy.start()
+
+
+def _run_waf_scan(targets, args):
+    """Run deep WAF vulnerability scanner."""
+    from .modules.waf_vuln_scanner import WAFVulnScanner
+
+    is_json = args.json
+    layers = None
+    if args.waf_scan_layers:
+        layers = [l.strip() for l in args.waf_scan_layers.split(",")]
+
+    all_reports = []
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        print(f"{CYAN}[*] WAF vulnerability scan: {domain}{RESET}", file=sys.stderr)
+
+        scanner = WAFVulnScanner(domain, timeout=args.timeout, proxy=args.proxy, user_agent=args.user_agent)
+
+        if layers:
+            report = {}
+            for layer in layers:
+                print(f"  {DIM}[*] Scanning layer: {layer}{RESET}", file=sys.stderr)
+                report[layer] = scanner.scan_layer(layer)
+        else:
+            report = scanner.scan_all()
+
+        all_reports.append({"target": domain, "report": report})
+
+        if not is_json:
+            _print_waf_scan_report(domain, report)
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _print_waf_scan_report(domain, report):
+    """Print WAF vulnerability scan results."""
+    W = max(len(domain) + 20, 60)
+    print(f"\n{BOLD}{RED}{'=' * W}{RESET}")
+    print(f"{BOLD}{RED}  WAF Vulnerability Scan: {domain}{RESET}")
+    print(f"{BOLD}{RED}{'=' * W}{RESET}")
+
+    findings = report.get("findings", [])
+    if not findings:
+        print(f"\n  {GREEN}No vulnerabilities found.{RESET}")
+
+    # Group by severity
+    for severity in ["critical", "high", "medium", "low", "info"]:
+        sev_findings = [f for f in findings if f.get("severity") == severity]
+        if not sev_findings:
+            continue
+        color = RED if severity in ("critical", "high") else YELLOW if severity == "medium" else DIM
+        print(f"\n  {BOLD}{color}── {severity.upper()} ({len(sev_findings)}) ──{RESET}")
+        for f in sev_findings:
+            print(f"    {color}[{f.get('layer', '?')}]{RESET} {f.get('title', '?')}")
+            if f.get("description"):
+                print(f"      {DIM}{f['description'][:100]}{RESET}")
+            conf = f.get("confidence", 0)
+            verified = f"{GREEN}verified{RESET}" if f.get("verified") else f"{YELLOW}unverified{RESET}"
+            print(f"      Confidence: {conf:.0%} | {verified}")
+
+    # Summary
+    layer_results = report.get("layers", {})
+    if layer_results:
+        print(f"\n  {BOLD}── Layer Summary ──{RESET}")
+        for layer_name, layer_data in layer_results.items():
+            count = len(layer_data.get("findings", []))
+            icon = f"{RED}!" if count > 0 else f"{GREEN}✓"
+            print(f"    {icon}{RESET} {layer_name:<15} {count} finding(s)")
+
+    print()
+
+
+def _run_cf_inject(targets, args):
+    """Test Cloudflare header injection bypass."""
+    from .modules.cf_header_inject import test_cf_header_trust
+
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        print(f"{CYAN}[*] Testing CF header injection: {domain}{RESET}", file=sys.stderr)
+        result = test_cf_header_trust(domain, timeout=args.timeout, proxy=args.proxy)
+
+        print(f"\n{BOLD}{CYAN}  CF Header Injection Test: {domain}{RESET}")
+
+        baseline = result.get("baseline", {})
+        if baseline:
+            print(f"    Baseline: [{baseline.get('status_code', '?')}] hash={baseline.get('body_hash', '?')}")
+
+        for name, test in result.get("individual_results", {}).items():
+            if test.get("different"):
+                print(f"    {RED}! {name}: status changed to [{test.get('status_code', '?')}]{RESET}")
+            else:
+                print(f"    {DIM}  {name}: no change{RESET}")
+
+        combined = result.get("combined_result", {})
+        if combined.get("different"):
+            print(f"    {RED}! ALL CF headers: status [{combined.get('status_code', '?')}] — WAF trusts CF headers!{RESET}")
+
+        findings = result.get("findings", [])
+        if findings:
+            print(f"\n    {BOLD}Findings:{RESET}")
+            for f in findings:
+                print(f"      {RED}! {f}{RESET}")
+        else:
+            print(f"\n    {GREEN}WAF does not appear to trust injected CF headers.{RESET}")
+        print()
 
 
 def _run_proton_check():
