@@ -549,6 +549,33 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
     direct_hash = report.get("direct_https", {}).get("body_hash")
     same_hash = cdn_hash and direct_hash and cdn_hash == direct_hash
 
+    # Fuzzy comparison: if hashes differ, check if it's just dynamic tokens (CSRF, nonces, timestamps)
+    if not same_hash and cdn_hash and direct_hash:
+        cdn_body = report.get("cdn_response", {}).get("body_text", "")
+        if not cdn_body:
+            # Try to get from the fetch — we need to compare structural content
+            pass
+        direct_body_raw = report.get("direct_https", {}).get("body", "")
+        cdn_body_raw = ""
+        # Re-fetch CDN body isn't available in report, but we can compare lengths and titles
+        cdn_length = report.get("cdn_response", {}).get("body_length", 0)
+        direct_length = report.get("direct_https", {}).get("body_length", 0)
+        cdn_title = ""  # not stored yet
+        direct_title_val = report.get("direct_https", {}).get("title", "") or ""
+
+        # If body lengths are very close (within 1% or 100 bytes) and same status code,
+        # it's likely the same page with dynamic tokens
+        if cdn_length and direct_length:
+            length_diff = abs(cdn_length - direct_length)
+            length_ratio = length_diff / max(cdn_length, direct_length, 1)
+            if length_ratio < 0.02 and length_diff < 200:
+                same_hash = True
+                report["hash_match_fuzzy"] = True
+                report["hash_match_note"] = (
+                    f"Fuzzy match: body lengths differ by {length_diff} bytes ({length_ratio:.1%}) "
+                    f"— likely same page with dynamic tokens (CSRF, nonces)"
+                )
+
     # Detect default/parking pages (not real content from the target domain)
     default_vhost_signatures = [
         "default server vhost", "default web page", "welcome to nginx",

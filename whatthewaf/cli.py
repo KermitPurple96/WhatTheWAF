@@ -1628,15 +1628,21 @@ def _run_direct_ip(targets, args):
                     seen_ips.add(r["ip"])
                     test_ips.append({"ip": r["ip"], "source": f"github ({r.get('repo', '?')})"})
 
-            # Shodan DNS records
+            # Shodan DNS records — only keep IPs for the target subdomain, not unrelated services
             status_cb("origins", "Shodan domain search")
             sys.stderr.write("\r\033[K"); sys.stderr.flush()
             shodan_results = origin_finder.search_shodan_domain(domain)
+            # Extract the subdomain prefix from target (e.g. "admin.pro.gms" from "admin.pro.gms.stratio.com")
+            domain_parts = domain.split(".")
+            base_domain = ".".join(domain_parts[-2:]) if len(domain_parts) >= 2 else domain
+            target_prefix = ".".join(domain_parts[:-2]) if len(domain_parts) > 2 else ""
             for r in shodan_results:
                 if r["ip"] not in seen_ips:
-                    seen_ips.add(r["ip"])
                     sub = r.get("subdomain", "")
-                    test_ips.append({"ip": r["ip"], "source": f"shodan ({sub})" if sub else "shodan"})
+                    # Only include: exact target, no subdomain (apex), or same subdomain prefix
+                    if not sub or sub == target_prefix or domain.startswith(sub + "."):
+                        seen_ips.add(r["ip"])
+                        test_ips.append({"ip": r["ip"], "source": f"shodan ({sub})" if sub else "shodan"})
 
             # VirusTotal resolutions
             status_cb("origins", "VirusTotal domain lookup")
@@ -1651,12 +1657,68 @@ def _run_direct_ip(targets, args):
                 print(f"{YELLOW}[!] No origin IP candidates found for {domain}{RESET}", file=sys.stderr)
                 continue
 
-            print(f"{GREEN}[+] Found {len(test_ips)} candidate IP(s) for {domain}:{RESET}", file=sys.stderr)
+            # Smart dedup: group by ASN, prioritize DNS A records and multi-source IPs,
+            # skip IPs that are clearly different services
+            from .modules import asn_lookup as _asn
+            all_candidate_ips = [t["ip"] for t in test_ips]
+            asn_info = _asn.lookup_asn_bulk(all_candidate_ips) if all_candidate_ips else []
+            asn_map = {r["ip"]: r for r in asn_info}
+
+            # Score each IP: DNS A records get highest priority, then by source relevance
             for t in test_ips:
-                print(f"    {t['ip']:<16} via {t['source']}", file=sys.stderr)
+                score = 0
+                src = t["source"].lower()
+                if "dns a record" in src:
+                    score = 100
+                elif "subdomain:" in src:
+                    score = 80
+                elif "securitytrails" in src or "dnstrails" in src:
+                    score = 60
+                elif "censys" in src or "favicon" in src:
+                    score = 50
+                elif "shodan" in src and "(" not in src:
+                    score = 40  # apex domain match
+                elif "shodan" in src:
+                    score = 30
+                elif "virustotal" in src:
+                    score = 20
+                elif "github" in src:
+                    score = 70  # github leaks are high value
+                else:
+                    score = 10
+                t["score"] = score
+
+            # Sort by score descending
+            test_ips.sort(key=lambda t: -t["score"])
+
+            # Group by ASN — keep best per ASN, cap at reasonable number
+            seen_asns = {}
+            prioritized = []
+            overflow = []
+            for t in test_ips:
+                asn = asn_map.get(t["ip"], {}).get("asn", "?")
+                if asn not in seen_asns:
+                    seen_asns[asn] = 0
+                seen_asns[asn] += 1
+                # Keep first 2 per ASN (load balancer might have different backends)
+                if seen_asns[asn] <= 2:
+                    prioritized.append(t)
+                else:
+                    overflow.append(t)
+
+            skipped = len(overflow)
+            print(f"{GREEN}[+] Found {len(test_ips)} candidate IP(s), testing {len(prioritized)}{RESET}"
+                  + (f" {DIM}(skipped {skipped} duplicate-ASN IPs){RESET}" if skipped else ""),
+                  file=sys.stderr)
+            for t in prioritized:
+                asn = asn_map.get(t["ip"], {})
+                asn_str = f"AS{asn.get('asn', '?')}" if asn.get("asn") else ""
+                print(f"    {t['ip']:<16} via {t['source']:<35} {DIM}{asn_str}{RESET}", file=sys.stderr)
+            if skipped:
+                print(f"    {DIM}... {skipped} more IPs in same ASNs (use --direct-ip <ip> to test individually){RESET}", file=sys.stderr)
             print(file=sys.stderr)
 
-            ips = [t["ip"] for t in test_ips]
+            ips = [t["ip"] for t in prioritized]
         else:
             # Comma-separated IPs
             ips = [ip.strip() for ip in args.direct_ip.split(",") if ip.strip()]
@@ -1753,7 +1815,10 @@ def _print_direct_ip_report(report):
     cdn_hash = report.get("cdn_response", {}).get("body_hash")
     direct_hash_val = report.get("direct_https", {}).get("body_hash")
     if cdn_hash and direct_hash_val:
-        if hash_match:
+        if report.get("hash_match_fuzzy"):
+            print(f"  {GREEN}≈ Fuzzy match: {cdn_hash} (CDN) ≈ {direct_hash_val} (direct){RESET}")
+            print(f"    {DIM}{report.get('hash_match_note', '')}{RESET}")
+        elif hash_match:
             print(f"  {GREEN}✓ Hash match: {cdn_hash} (CDN) == {direct_hash_val} (direct){RESET}")
         else:
             print(f"  {YELLOW}✗ Hash mismatch: {cdn_hash} (CDN) != {direct_hash_val} (direct){RESET}")
