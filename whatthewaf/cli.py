@@ -1657,68 +1657,52 @@ def _run_direct_ip(targets, args):
                 print(f"{YELLOW}[!] No origin IP candidates found for {domain}{RESET}", file=sys.stderr)
                 continue
 
-            # Smart dedup: group by ASN, prioritize DNS A records and multi-source IPs,
-            # skip IPs that are clearly different services
+            # ASN-classify all candidates and skip CDN/WAF edge IPs
             from .modules import asn_lookup as _asn
             all_candidate_ips = [t["ip"] for t in test_ips]
             asn_info = _asn.lookup_asn_bulk(all_candidate_ips) if all_candidate_ips else []
             asn_map = {r["ip"]: r for r in asn_info}
 
-            # Score each IP: DNS A records get highest priority, then by source relevance
+            cdn_waf_keywords = {
+                "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
+                "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
+                "stackpath", "cdn77", "bunny", "gcore", "limelight",
+                "stormwall", "radware", "barracuda", "f5 ", "fortinet",
+                "datadome", "perimeterx", "reblaze", "wallarm",
+                "azure front door", "aws shield", "google cloud armor",
+                "netlify", "vercel",
+            }
+
+            kept = []
+            skipped_cdn = []
             for t in test_ips:
-                score = 0
-                src = t["source"].lower()
-                if "dns a record" in src:
-                    score = 100
-                elif "subdomain:" in src:
-                    score = 80
-                elif "securitytrails" in src or "dnstrails" in src:
-                    score = 60
-                elif "censys" in src or "favicon" in src:
-                    score = 50
-                elif "shodan" in src and "(" not in src:
-                    score = 40  # apex domain match
-                elif "shodan" in src:
-                    score = 30
-                elif "virustotal" in src:
-                    score = 20
-                elif "github" in src:
-                    score = 70  # github leaks are high value
+                asn = asn_map.get(t["ip"], {})
+                provider = asn.get("provider", "").lower()
+                if any(kw in provider for kw in cdn_waf_keywords):
+                    skipped_cdn.append(t)
                 else:
-                    score = 10
-                t["score"] = score
+                    kept.append(t)
 
-            # Sort by score descending
-            test_ips.sort(key=lambda t: -t["score"])
+            if skipped_cdn:
+                print(f"{DIM}[*] Skipped {len(skipped_cdn)} CDN/WAF edge IP(s) (direct access = pointless):{RESET}", file=sys.stderr)
+                for t in skipped_cdn[:5]:
+                    asn = asn_map.get(t["ip"], {})
+                    print(f"    {DIM}{t['ip']:<16} {asn.get('provider', '?')}{RESET}", file=sys.stderr)
+                if len(skipped_cdn) > 5:
+                    print(f"    {DIM}... and {len(skipped_cdn) - 5} more{RESET}", file=sys.stderr)
 
-            # Group by ASN — keep best per ASN, cap at reasonable number
-            seen_asns = {}
-            prioritized = []
-            overflow = []
-            for t in test_ips:
-                asn = asn_map.get(t["ip"], {}).get("asn", "?")
-                if asn not in seen_asns:
-                    seen_asns[asn] = 0
-                seen_asns[asn] += 1
-                # Keep first 2 per ASN (load balancer might have different backends)
-                if seen_asns[asn] <= 2:
-                    prioritized.append(t)
-                else:
-                    overflow.append(t)
+            if not kept:
+                print(f"{YELLOW}[!] All {len(test_ips)} IPs are CDN/WAF edges — no origin candidates to test{RESET}", file=sys.stderr)
+                continue
 
-            skipped = len(overflow)
-            print(f"{GREEN}[+] Found {len(test_ips)} candidate IP(s), testing {len(prioritized)}{RESET}"
-                  + (f" {DIM}(skipped {skipped} duplicate-ASN IPs){RESET}" if skipped else ""),
-                  file=sys.stderr)
-            for t in prioritized:
+            print(f"{GREEN}[+] Testing {len(kept)} origin candidate IP(s) for {domain}:{RESET}", file=sys.stderr)
+            for t in kept:
                 asn = asn_map.get(t["ip"], {})
                 asn_str = f"AS{asn.get('asn', '?')}" if asn.get("asn") else ""
                 print(f"    {t['ip']:<16} via {t['source']:<35} {DIM}{asn_str}{RESET}", file=sys.stderr)
-            if skipped:
-                print(f"    {DIM}... {skipped} more IPs in same ASNs (use --direct-ip <ip> to test individually){RESET}", file=sys.stderr)
             print(file=sys.stderr)
 
-            ips = [t["ip"] for t in prioritized]
+            ips = [t["ip"] for t in kept]
         else:
             # Comma-separated IPs
             ips = [ip.strip() for ip in args.direct_ip.split(",") if ip.strip()]
