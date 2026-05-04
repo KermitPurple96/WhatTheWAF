@@ -115,8 +115,14 @@ def init_config():
 
     template = """[keys]
 # WhatTheWAF API Keys
-# Uncomment and fill in the keys you have.
-# Environment variables (e.g. SHODAN_API_KEY) always take priority.
+# Remove the # at the start of a line to activate it.
+# Environment variables (e.g. SHODAN_API_KEY) always override this file.
+#
+# Example — this is COMMENTED OUT (ignored):
+#   # shodan_api_key = xxxx
+#
+# This is ACTIVE (loaded):
+#   shodan_api_key = xxxx
 
 # shodan_api_key =
 # censys_api_id =

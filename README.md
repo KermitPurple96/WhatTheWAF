@@ -13,7 +13,7 @@ pip install -e .
 pip install -e ".[full]"
 ```
 
-On install, a template API key config is created at `~/.config/whatthewaf/api_keys.conf`. Edit it to add your keys, or set environment variables instead.
+On install, a template API key config is created at `~/.config/whatthewaf/api_keys.conf` (permissions 600, outside the repo — never uploaded to git). Edit it to add your keys — **remove the `#` to uncomment lines** — or set environment variables instead.
 
 Both `whatthewaf` and `wtw` commands are available after install.
 
@@ -460,10 +460,22 @@ wtw --api-status
 
 ### Config File
 
-Keys are stored in `~/.config/whatthewaf/api_keys.conf` (permissions 600, never uploaded to git):
+Keys are stored in `~/.config/whatthewaf/api_keys.conf` (permissions 600, outside the git repo — never uploaded). Lines starting with `#` are comments and ignored. **Remove the `#` to activate a key.**
+
+```bash
+# Create template (auto-runs on install)
+wtw --api-init
+
+# Edit it
+nano ~/.config/whatthewaf/api_keys.conf
+
+# Verify
+wtw --api-status
+```
 
 ```ini
 [keys]
+# Remove the # prefix to activate a key:
 shodan_api_key = YOUR_KEY
 censys_api_id = YOUR_ID
 censys_api_secret = YOUR_SECRET
