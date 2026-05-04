@@ -673,6 +673,77 @@ def search_virustotal(domain, timeout=15):
     return results
 
 
+def search_dnstrails(domain, timeout=15):
+    """Query DNSTrails API for historical DNS records and subdomains.
+
+    DNSTrails (now part of SecurityTrails) provides historical A records
+    and subdomain enumeration.
+    Returns list of dicts: ip, source, subdomain/last_seen
+    """
+    import requests
+
+    key = api_keys.get("dnstrails_api_key")
+    if not key:
+        return []
+
+    results = []
+    seen_ips = set()
+
+    # Historical A records
+    try:
+        resp = requests.get(
+            f"https://api.securitytrails.com/v1/history/{domain}/dns/a",
+            headers={"APIKEY": key, "Accept": "application/json"},
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for record in data.get("records", []):
+                for val in record.get("values", []):
+                    ip = val.get("ip", "")
+                    if asn_lookup.is_ip(ip) and ip not in seen_ips:
+                        seen_ips.add(ip)
+                        results.append({
+                            "ip": ip,
+                            "source": "dnstrails",
+                            "type": "history",
+                            "last_seen": record.get("last_seen", ""),
+                        })
+    except Exception:
+        pass
+
+    # Subdomains
+    try:
+        resp = requests.get(
+            f"https://api.securitytrails.com/v1/domain/{domain}/subdomains",
+            headers={"APIKEY": key, "Accept": "application/json"},
+            params={"children_only": "false"},
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            subs = data.get("subdomains", [])
+            for sub in subs[:30]:
+                fqdn = f"{sub}.{domain}"
+                try:
+                    ips = dns_resolver.resolve_ip(fqdn)
+                    for ip in ips:
+                        if asn_lookup.is_ip(ip) and ip not in seen_ips:
+                            seen_ips.add(ip)
+                            results.append({
+                                "ip": ip,
+                                "source": "dnstrails",
+                                "type": "subdomain",
+                                "subdomain": fqdn,
+                            })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    return results
+
+
 def search_whoxy(domain, timeout=15):
     """Use Whoxy to find sibling domains (same registrant) and resolve them for origin IPs.
 

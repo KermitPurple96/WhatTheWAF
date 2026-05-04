@@ -154,6 +154,8 @@ def main():
                         help="Query SecurityTrails for historical DNS A records")
     parser.add_argument("--whoxy", action="store_true",
                         help="Whoxy WHOIS + reverse WHOIS to find sibling domains and shared IPs")
+    parser.add_argument("--dnstrails", action="store_true",
+                        help="DNSTrails historical DNS records and subdomain enumeration")
     parser.add_argument("--recon", action="store_true",
                         help="Run all OSINT sources, correlate results, and classify IPs")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
@@ -212,7 +214,8 @@ def main():
     # Individual OSINT tools (some can run without a target)
     osint_mode = any([args.favicon is not None, args.github_leaks,
                       args.censys is not None, args.shodan is not None,
-                      args.virustotal, args.securitytrails, args.whoxy])
+                      args.virustotal, args.securitytrails, args.whoxy,
+                      args.dnstrails])
     if osint_mode:
         _run_osint(targets, args)
         return
@@ -650,6 +653,18 @@ def _run_recon(targets, args):
         else:
             source_status["whoxy"] = "no key"
 
+        # 11. DNSTrails
+        if api_keys.get("dnstrails_api_key"):
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [D] DNSTrails{RESET}"); sys.stderr.flush()
+            dt = origin_finder.search_dnstrails(domain, timeout=args.timeout)
+            for r in dt:
+                label = r.get("subdomain", "") if r.get("type") == "subdomain" else "history"
+                _add(r["ip"], f"dnstrails:{label}")
+            source_status["dnstrails"] = len(dt)
+        else:
+            source_status["dnstrails"] = "no key"
+
         sys.stderr.write("\r\033[K"); sys.stderr.flush()
 
         # === CORRELATION: ASN classify all collected IPs ===
@@ -991,6 +1006,34 @@ def _run_osint(targets, args):
                     print(f"  {DIM}WHOIS privacy enabled — no reverse WHOIS possible{RESET}")
             print()
 
+        # DNSTrails
+        if args.dnstrails:
+            print(f"{CYAN}[*] DNSTrails: {domain}{RESET}", file=sys.stderr)
+            if not api_keys.get("dnstrails_api_key"):
+                print(f"  {RED}[!] DNSTrails API key not configured{RESET}")
+                print(f"  {DIM}Set DNSTRAILS_API_KEY or run: wtw --api-init{RESET}")
+                report["sources"]["dnstrails"] = {"error": "API key not configured"}
+            else:
+                results = origin_finder.search_dnstrails(domain, timeout=args.timeout)
+                report["sources"]["dnstrails"] = results
+                if results:
+                    hist = [r for r in results if r.get("type") == "history"]
+                    subs = [r for r in results if r.get("type") == "subdomain"]
+                    print(f"\n  {BOLD}DNSTrails{RESET}")
+                    if hist:
+                        print(f"    {BOLD}Historical A Records ({len(hist)}):{RESET}")
+                        for r in hist:
+                            seen = r.get("last_seen", "")
+                            seen_str = f"  {DIM}last seen: {seen}{RESET}" if seen else ""
+                            print(f"      {GREEN}{r['ip']:<16}{RESET}{seen_str}")
+                    if subs:
+                        print(f"    {BOLD}Subdomain IPs ({len(subs)}):{RESET}")
+                        for r in subs:
+                            print(f"      {GREEN}{r['ip']:<16}{RESET}  {CYAN}{r.get('subdomain', '?')}{RESET}")
+                else:
+                    print(f"  {DIM}No results from DNSTrails for {domain}{RESET}")
+            print()
+
         # Summary
         all_ips = {}
         for source_name, source_data in report["sources"].items():
@@ -1201,6 +1244,7 @@ def _run_api_status():
         "passivetotal_username": "PassiveTotal (User)",
         "passivetotal_key": "PassiveTotal (Key)",
         "whoxy_api_key": "Whoxy",
+        "dnstrails_api_key": "DNSTrails",
     }
     for key_name, configured in key_status.items():
         label = labels.get(key_name, key_name)

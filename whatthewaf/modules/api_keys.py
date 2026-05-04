@@ -36,6 +36,7 @@ _KEY_MAP = {
     "passivetotal_username": "PASSIVETOTAL_USER",
     "passivetotal_key":     "PASSIVETOTAL_KEY",
     "whoxy_api_key":        "WHOXY_API_KEY",
+    "dnstrails_api_key":    "DNSTRAILS_API_KEY",
 }
 
 _cache = None
@@ -129,6 +130,7 @@ def init_config():
 # passivetotal_username =
 # passivetotal_key =
 # whoxy_api_key =
+# dnstrails_api_key =
 """
     with open(path, "w") as f:
         f.write(template)

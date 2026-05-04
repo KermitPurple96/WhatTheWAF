@@ -9,9 +9,11 @@ git clone https://github.com/KermitPurple96/WhatTheWAF.git
 cd WhatTheWAF
 pip install -e .
 
-# Optional: favicon hash matching
-pip install mmh3
+# Optional: favicon hash matching + all extras
+pip install -e ".[full]"
 ```
+
+On install, a template API key config is created at `~/.config/whatthewaf/api_keys.conf`. Edit it to add your keys, or set environment variables instead.
 
 Both `whatthewaf` and `wtw` commands are available after install.
 
@@ -78,6 +80,7 @@ When a CDN/WAF is detected, the tool tries to find the origin server IP through 
 | **Shodan DNS records** | Queries Shodan's passive DNS for subdomain A records | Yes |
 | **VirusTotal resolutions** | Historical domain-to-IP mappings from VirusTotal's passive DNS | Yes |
 | **Whoxy reverse WHOIS** | WHOIS lookup → registrant email → reverse WHOIS to find sibling domains → resolve for shared origin IPs | Yes |
+| **DNSTrails** | Historical DNS A records + subdomain enumeration (SecurityTrails-compatible API) | Yes |
 
 With `--direct-ip auto` or `--recon`, all available techniques run in sequence, collect candidate IPs, deduplicate them, and correlate across sources. `--recon` ranks IPs by how many sources found them.
 
@@ -224,7 +227,7 @@ wtw example.com --only evasion
 --recon                  Run ALL OSINT sources, correlate IPs, classify CDN vs origin
 ```
 
-Runs every available source in sequence (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy), then:
+Runs every available source in sequence (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails), then:
 - ASN-classifies every IP (CDN vs origin vs hosting)
 - Cross-references which sources found each IP
 - Ranks by confidence (more sources = higher confidence)
@@ -275,6 +278,7 @@ Run each discovery source individually. Each flag accepts an optional argument f
 --virustotal             VirusTotal domain resolution history
 --securitytrails         SecurityTrails historical DNS A records
 --whoxy                  WHOIS + reverse WHOIS → sibling domains → shared origin IPs
+--dnstrails              DNSTrails historical DNS + subdomain enumeration
 ```
 
 ```bash
@@ -472,6 +476,7 @@ chinaz_api_key = YOUR_KEY
 passivetotal_username = you@example.com
 passivetotal_key = YOUR_KEY
 whoxy_api_key = YOUR_KEY
+dnstrails_api_key = YOUR_KEY
 ```
 
 ### Environment Variables
@@ -491,6 +496,7 @@ export CHINAZ_KEY=xxx
 export PASSIVETOTAL_USER=xxx
 export PASSIVETOTAL_KEY=xxx
 export WHOXY_API_KEY=xxx
+export DNSTRAILS_API_KEY=xxx
 ```
 
 ### What Each Key Enables
@@ -504,6 +510,7 @@ export WHOXY_API_KEY=xxx
 | SecurityTrails | Historical DNS A records (better coverage than ViewDNS) | Yes (50 queries/month) |
 | VirusTotal | Domain resolution history (passive DNS) | Yes (500 queries/day) |
 | Whoxy | WHOIS + reverse WHOIS to find sibling domains sharing origin IPs | Yes (limited) |
+| DNSTrails | Historical DNS A records + subdomain enumeration | Yes (limited) |
 | Chinaz | Chinese domain/IP intelligence | Varies |
 | PassiveTotal | Passive DNS data | Yes (limited) |
 
@@ -667,8 +674,8 @@ With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
 | cf_header_inject | Cloudflare header trust testing (CF-Connecting-IP, CF-Ray, etc.) |
 | response_advisor | Escalating auto-retry strategies on WAF blocks |
 | tui_dashboard | Real-time terminal UI with live traffic and technique tracking |
-| origin_finder | Subdomain leakage, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy |
-| api_keys | API key management (config file + env vars) for 12 services |
+| origin_finder | Subdomain leakage, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails |
+| api_keys | API key management (config file + env vars) for 13 services |
 | error_pages | Probe 404/403/500/WAF trigger pages for signature leakage |
 | asn_lookup | ASN classification: 50+ WAF/CDN providers, 30+ hosting providers |
 | dns_resolver | DNS resolution with CNAME chain extraction |
