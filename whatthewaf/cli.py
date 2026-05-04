@@ -33,16 +33,19 @@ def main():
         epilog="""examples:
   whatthewaf example.com
   whatthewaf example.com --only waf
-  whatthewaf example.com --direct-ip 1.2.3.4,5.6.7.8
   whatthewaf example.com --direct-ip auto
   whatthewaf example.com --evasion
   whatthewaf example.com --waf-scan
-  whatthewaf example.com --waf-scan --waf-scan-layers ruleengine,evasion
-  whatthewaf example.com --cf-inject
+
+  # individual OSINT tools
+  whatthewaf example.com --favicon
+  whatthewaf example.com --github-leaks
+  whatthewaf example.com --censys --shodan --virustotal
+  whatthewaf example.com --favicon --censys --shodan --github-leaks --securitytrails --virustotal
+
+  # stealth
   whatthewaf example.com --tor --tls-rotate --source-port rotating
   whatthewaf --proxy-mode --proton --tls-rotate --h2-rotate
-  whatthewaf --mitm --tor --tls-rotate --source-port rotating
-  whatthewaf example.com --proxy-pool proxies.txt
   cat subs.txt | whatthewaf --stdin -m origins""",
     )
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
@@ -132,6 +135,27 @@ def main():
     parser.add_argument("--tui", action="store_true",
                         help="Show real-time TUI dashboard (requires urwid)")
     parser.add_argument("--no-banner", action="store_true")
+    parser.add_argument("--api-status", action="store_true",
+                        help="Show which API keys are configured")
+    parser.add_argument("--api-init", action="store_true",
+                        help="Create template API key config file")
+    # Individual OSINT tools
+    parser.add_argument("--favicon", nargs="?", const="auto", default=None, metavar="URL_OR_HASH",
+                        help="Favicon hash search. No arg: fetch from target. URL: fetch from URL. Number: use as MMH3 hash directly.")
+    parser.add_argument("--github-leaks", action="store_true",
+                        help="Search GitHub for leaked origin IPs in configs/.env files")
+    parser.add_argument("--censys", nargs="?", const="auto", default=None, metavar="QUERY",
+                        help="Censys search. No arg: cert search for target. String: raw Censys query.")
+    parser.add_argument("--shodan", nargs="?", const="auto", default=None, metavar="QUERY",
+                        help="Shodan search. No arg: domain DNS records. String: raw Shodan query.")
+    parser.add_argument("--virustotal", action="store_true",
+                        help="Query VirusTotal for domain resolution history")
+    parser.add_argument("--securitytrails", action="store_true",
+                        help="Query SecurityTrails for historical DNS A records")
+    parser.add_argument("--whoxy", action="store_true",
+                        help="Whoxy WHOIS + reverse WHOIS to find sibling domains and shared IPs")
+    parser.add_argument("--recon", action="store_true",
+                        help="Run all OSINT sources, correlate results, and classify IPs")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
 
     args = parser.parse_args()
@@ -176,8 +200,29 @@ def main():
     if args.mitm:
         _run_mitm_proxy(args)
         return
+    if args.api_status:
+        _run_api_status()
+        return
+    if args.api_init:
+        _run_api_init()
+        return
 
     targets = _collect_targets(args)
+
+    # Individual OSINT tools (some can run without a target)
+    osint_mode = any([args.favicon is not None, args.github_leaks,
+                      args.censys is not None, args.shodan is not None,
+                      args.virustotal, args.securitytrails, args.whoxy])
+    if osint_mode:
+        _run_osint(targets, args)
+        return
+
+    if args.recon:
+        if not targets:
+            parser.error("--recon requires at least one target domain.")
+        _run_recon(targets, args)
+        return
+
     if not targets:
         parser.error("No targets specified.")
 
@@ -288,6 +333,22 @@ def _run_stealth_status():
         tui_ok = WAFDashboard.is_available()
         print(f"\n  {BOLD}TUI Dashboard:{RESET}")
         print(f"    Status: {GREEN + 'Available' + RESET if tui_ok else YELLOW + 'Fallback (pip install urwid)' + RESET}")
+    except Exception:
+        pass
+
+    # API Keys
+    try:
+        from .modules import api_keys
+        key_status = api_keys.status()
+        configured = [k for k, v in key_status.items() if v]
+        print(f"\n  {BOLD}API Keys:{RESET}")
+        if configured:
+            print(f"    Configured: {GREEN}{len(configured)}/{len(key_status)}{RESET}")
+            for k in configured:
+                print(f"      {GREEN}✓{RESET} {k}")
+        else:
+            print(f"    Status: {YELLOW}No API keys configured{RESET}")
+        print(f"    Setup: {CYAN}wtw --api-init && wtw --api-status{RESET}")
     except Exception:
         pass
 
@@ -449,6 +510,723 @@ def _run_mitm_proxy(args):
         verbose=args.proxy_verbose,
     )
     proxy.start()
+
+
+def _run_recon(targets, args):
+    """Run all OSINT sources, correlate results, classify every IP."""
+    from .modules import origin_finder, api_keys, dns_resolver, asn_lookup
+
+    is_json = args.json
+    all_reports = []
+
+    for target in targets:
+        domain = dns_resolver._clean_domain(target)
+        if not is_json:
+            W = max(len(domain) + 20, 60)
+            print(f"\n{BOLD}{CYAN}{'=' * W}{RESET}")
+            print(f"{BOLD}{CYAN}  OSINT Recon: {domain}{RESET}")
+            print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
+
+        # ip -> {sources: set, ports: set, hostnames: set, org: str, ...}
+        ip_intel = {}
+
+        def _add(ip, source, **extra):
+            if not ip:
+                return
+            if ip not in ip_intel:
+                ip_intel[ip] = {"sources": set(), "ports": set(), "hostnames": set(), "extra": {}}
+            ip_intel[ip]["sources"].add(source)
+            for k, v in extra.items():
+                if k == "port" and v:
+                    ip_intel[ip]["ports"].add(v)
+                elif k == "hostnames" and v:
+                    ip_intel[ip]["hostnames"].update(v)
+                elif v:
+                    ip_intel[ip]["extra"][k] = v
+
+        source_status = {}  # source -> count or error
+
+        # 1. DNS A records
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [~] DNS resolution{RESET}"); sys.stderr.flush()
+        dns_info = dns_resolver.resolve_domain(domain)
+        a_records = dns_info.get("a_records", [])
+        for ip in a_records:
+            _add(ip, "dns")
+        source_status["dns"] = len(a_records)
+
+        # 2. Subdomain leakage
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [*] Subdomain leakage scan{RESET}"); sys.stderr.flush()
+        cdn_ips = set()
+        if a_records:
+            asn_records = asn_lookup.lookup_asn_bulk(a_records)
+            cdn_ips = {r["ip"] for r in asn_records if r["classification"] == "CDN"}
+        subs = origin_finder.find_origins(domain, cdn_ips=cdn_ips, timeout=args.timeout)
+        for c in subs:
+            if not c.get("is_cdn"):
+                _add(c["ip"], f"subdomain:{c.get('subdomain', '?')}")
+        source_status["subdomains"] = len([c for c in subs if not c.get("is_cdn")])
+
+        # 3. Historical DNS (ViewDNS + SecurityTrails)
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [<] Historical DNS{RESET}"); sys.stderr.flush()
+        historical = origin_finder.fetch_historical_ips(domain, timeout=args.timeout)
+        for h in historical:
+            _add(h["ip"], f"history:{h.get('source', 'viewdns')}", last_seen=h.get("last_seen", ""))
+        source_status["historical_dns"] = len(historical)
+
+        # 4. SSL certificate
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [@] SSL certificate inspection{RESET}"); sys.stderr.flush()
+        cert_info = None
+        if a_records:
+            cert_info = origin_finder.check_ssl_cert(a_records[0], domain, timeout=args.timeout)
+
+        # 5. Favicon hash
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [#] Favicon hash matching{RESET}"); sys.stderr.flush()
+        fav = origin_finder.fetch_favicon_hash(domain, timeout=args.timeout)
+        fav_results = []
+        if fav:
+            fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain, timeout=args.timeout)
+            for r in fav_results:
+                _add(r["ip"], f"favicon:{r['source']}", port=r.get("port"), hostnames=r.get("hostnames"),
+                     org=r.get("org", ""))
+        source_status["favicon"] = len(fav_results) if fav else "no favicon"
+
+        # 6. GitHub leaks
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [G] GitHub leak search{RESET}"); sys.stderr.flush()
+        github = origin_finder.search_github_leaks(domain, timeout=args.timeout)
+        for r in github:
+            _add(r["ip"], "github", repo=r.get("repo", ""), context=r.get("context", "")[:100])
+        source_status["github"] = len(github)
+
+        # 7. Censys
+        if api_keys.get("censys_api_id") and api_keys.get("censys_api_secret"):
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [C] Censys certificate search{RESET}"); sys.stderr.flush()
+            censys = origin_finder.search_censys(domain, timeout=args.timeout)
+            for r in censys:
+                _add(r["ip"], "censys", org=r.get("autonomous_system", ""))
+            source_status["censys"] = len(censys)
+        else:
+            source_status["censys"] = "no key"
+
+        # 8. Shodan
+        if api_keys.get("shodan_api_key"):
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [S] Shodan domain search{RESET}"); sys.stderr.flush()
+            shodan = origin_finder.search_shodan_domain(domain, timeout=args.timeout)
+            for r in shodan:
+                sub = r.get("subdomain", "")
+                _add(r["ip"], f"shodan" + (f":{sub}" if sub else ""), last_seen=r.get("last_seen", ""))
+            source_status["shodan"] = len(shodan)
+        else:
+            source_status["shodan"] = "no key"
+
+        # 9. VirusTotal
+        if api_keys.get("virustotal_api_key"):
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [V] VirusTotal resolutions{RESET}"); sys.stderr.flush()
+            vt = origin_finder.search_virustotal(domain, timeout=args.timeout)
+            for r in vt:
+                _add(r["ip"], "virustotal", last_seen=r.get("last_seen", ""))
+            source_status["virustotal"] = len(vt)
+        else:
+            source_status["virustotal"] = "no key"
+
+        # 10. Whoxy (WHOIS + reverse WHOIS → sibling domains → IPs)
+        if api_keys.get("whoxy_api_key"):
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [W] Whoxy reverse WHOIS{RESET}"); sys.stderr.flush()
+            whoxy = origin_finder.search_whoxy(domain, timeout=args.timeout)
+            for r in whoxy.get("ips", []):
+                _add(r["ip"], f"whoxy:{r.get('sibling_domain', '?')}")
+            source_status["whoxy"] = len(whoxy.get("ips", []))
+            if whoxy.get("sibling_domains"):
+                source_status["whoxy_siblings"] = len(whoxy["sibling_domains"])
+        else:
+            source_status["whoxy"] = "no key"
+
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # === CORRELATION: ASN classify all collected IPs ===
+        all_ips = list(ip_intel.keys())
+        asn_map = {}
+        if all_ips:
+            asn_results = asn_lookup.lookup_asn_bulk(all_ips)
+            for rec in asn_results:
+                asn_map[rec["ip"]] = rec
+
+        # Classify each IP
+        for ip, intel in ip_intel.items():
+            asn = asn_map.get(ip, {})
+            intel["asn"] = asn.get("asn", "")
+            intel["provider"] = asn.get("provider", "")
+            intel["classification"] = asn.get("classification", "UNKNOWN")
+            intel["country"] = asn.get("country", "")
+            intel["source_count"] = len(intel["sources"])
+
+        # Sort: most sources first, then non-CDN first
+        ranked = sorted(ip_intel.items(), key=lambda x: (
+            -x[1]["source_count"],
+            x[1]["classification"] == "CDN",
+            x[0],
+        ))
+
+        # === PRINT RESULTS ===
+        if not is_json:
+            # Sources summary
+            print(f"\n  {BOLD}Sources Queried{RESET}")
+            for src, count in source_status.items():
+                if isinstance(count, int):
+                    icon = f"{GREEN}✓{RESET}" if count > 0 else f"{DIM}·{RESET}"
+                    print(f"    {icon} {src:<20} {count} result(s)")
+                else:
+                    print(f"    {YELLOW}·{RESET} {src:<20} {DIM}{count}{RESET}")
+
+            # Favicon hash
+            if fav:
+                print(f"\n  {BOLD}Favicon{RESET}")
+                print(f"    Hash: {BOLD}{fav['hash']}{RESET}  ({fav.get('favicon_url', '?')})")
+                print(f"    {DIM}Shodan: http.favicon.hash:{fav['hash']}{RESET}")
+
+            # SSL cert
+            if cert_info:
+                print(f"\n  {BOLD}SSL Certificate{RESET}")
+                print(f"    CN:     {cert_info.get('common_name', '?')}")
+                print(f"    Issuer: {cert_info.get('issuer', '?')}")
+                if cert_info.get("is_cdn_issued"):
+                    print(f"    {YELLOW}CDN-issued certificate{RESET}")
+
+            # Correlated IP table
+            print(f"\n  {BOLD}Correlated IPs ({len(ranked)} unique){RESET}")
+            print(f"  {'─' * 90}")
+            print(f"  {BOLD}{'IP':<17} {'ASN':<10} {'Provider':<25} {'Type':<8} {'#Src':<5} Sources{RESET}")
+            print(f"  {'─' * 90}")
+
+            cdn_ips_found = []
+            origin_candidates = []
+            other_ips = []
+
+            for ip, intel in ranked:
+                cls = intel["classification"]
+                src_count = intel["source_count"]
+                sources_short = ", ".join(sorted(intel["sources"]))
+                if len(sources_short) > 40:
+                    sources_short = sources_short[:37] + "..."
+                asn_str = f"AS{intel['asn']}" if intel['asn'] else "?"
+                provider = intel["provider"][:24] if intel["provider"] else "?"
+
+                if cls == "CDN":
+                    color = RED
+                    cdn_ips_found.append(ip)
+                elif src_count >= 2:
+                    color = GREEN
+                    origin_candidates.append(ip)
+                else:
+                    color = YELLOW
+                    origin_candidates.append(ip)
+
+                bar = "█" * min(src_count, 10)
+                print(f"  {color}{ip:<17}{RESET} {asn_str:<10} {provider:<25} {color}{cls:<8}{RESET} {src_count:<5}{DIM}{sources_short}{RESET}")
+
+            print(f"  {'─' * 90}")
+
+            # Verdict
+            print(f"\n  {BOLD}Analysis{RESET}")
+            if cdn_ips_found:
+                print(f"    {RED}CDN/WAF IPs:{RESET} {', '.join(cdn_ips_found[:5])}")
+            if origin_candidates:
+                # Separate high-confidence (2+ sources) from low-confidence (1 source)
+                high = [ip for ip in origin_candidates if ip_intel[ip]["source_count"] >= 2]
+                low = [ip for ip in origin_candidates if ip_intel[ip]["source_count"] == 1]
+                if high:
+                    print(f"    {GREEN}High confidence origins (2+ sources):{RESET}")
+                    for ip in high:
+                        intel = ip_intel[ip]
+                        print(f"      {GREEN}{ip:<17}{RESET} ({intel['source_count']} sources: {', '.join(sorted(intel['sources']))})")
+                if low:
+                    print(f"    {YELLOW}Low confidence (1 source):{RESET}")
+                    for ip in low[:10]:
+                        intel = ip_intel[ip]
+                        src = next(iter(intel["sources"]))
+                        print(f"      {YELLOW}{ip:<17}{RESET} ({src})")
+                    if len(low) > 10:
+                        print(f"      {DIM}... and {len(low) - 10} more{RESET}")
+            else:
+                print(f"    {DIM}No non-CDN IPs found.{RESET}")
+
+            # Direct-IP command
+            if origin_candidates:
+                # Prioritize high-confidence
+                test_ips = [ip for ip in origin_candidates if ip_intel[ip]["source_count"] >= 2]
+                if not test_ips:
+                    test_ips = origin_candidates[:10]
+                ip_list = ",".join(test_ips[:15])
+                print(f"\n  {BOLD}Next Steps{RESET}")
+                print(f"    {CYAN}wtw {domain} --direct-ip {ip_list}{RESET}")
+                if len(test_ips) > 15:
+                    print(f"    {DIM}({len(test_ips) - 15} more IPs not shown — use --json for full list){RESET}")
+            print()
+
+        # Build JSON report
+        report = {
+            "target": domain,
+            "sources_queried": source_status,
+            "favicon": fav,
+            "cert": cert_info,
+            "ips": [],
+        }
+        for ip, intel in ranked:
+            report["ips"].append({
+                "ip": ip,
+                "asn": intel["asn"],
+                "provider": intel["provider"],
+                "classification": intel["classification"],
+                "country": intel["country"],
+                "source_count": intel["source_count"],
+                "sources": sorted(intel["sources"]),
+                "ports": sorted(intel["ports"]),
+                "hostnames": sorted(intel["hostnames"]),
+            })
+        all_reports.append(report)
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _run_osint(targets, args):
+    """Run individual OSINT / origin discovery tools."""
+    from .modules import origin_finder, api_keys, dns_resolver
+
+    is_json = args.json
+    all_results = []
+
+    # Favicon can work without a target if given a URL or hash directly
+    if args.favicon is not None and args.favicon != "auto":
+        _run_favicon_standalone(args.favicon, args, is_json)
+        # If no other flags, we're done
+        if not any([args.github_leaks, args.censys is not None, args.shodan is not None,
+                     args.virustotal, args.securitytrails]):
+            return
+
+    # Shodan/Censys can run raw queries without a target
+    if not targets:
+        if args.shodan is not None and args.shodan != "auto":
+            _run_shodan_raw(args.shodan, args, is_json)
+        if args.censys is not None and args.censys != "auto":
+            _run_censys_raw(args.censys, args, is_json)
+        return
+
+    for target in targets:
+        domain = dns_resolver._clean_domain(target)
+        report = {"target": domain, "sources": {}}
+
+        # Favicon hash matching
+        if args.favicon is not None and args.favicon == "auto":
+            print(f"{CYAN}[*] Favicon hash: {domain}{RESET}", file=sys.stderr)
+            fav = origin_finder.fetch_favicon_hash(domain, timeout=args.timeout)
+            if fav:
+                report["sources"]["favicon"] = {"hash": fav}
+                _print_favicon_result(fav, api_keys)
+                results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain, timeout=args.timeout)
+                report["sources"]["favicon"]["results"] = results
+                _print_favicon_search_results(results, api_keys)
+            else:
+                report["sources"]["favicon"] = {"error": "No favicon found or mmh3 not installed"}
+                print(f"  {YELLOW}[!] No favicon found for {domain}{RESET}")
+                try:
+                    import mmh3 as _
+                except ImportError:
+                    print(f"  {DIM}Install mmh3 for favicon hashing: pip install mmh3{RESET}")
+            print()
+
+        # GitHub leak search
+        if args.github_leaks:
+            print(f"{CYAN}[*] GitHub leak search: {domain}{RESET}", file=sys.stderr)
+            results = origin_finder.search_github_leaks(domain, timeout=args.timeout)
+            report["sources"]["github"] = results
+            if results:
+                print(f"\n  {BOLD}GitHub Leaks{RESET}")
+                print(f"    {GREEN}Found {len(results)} potential origin IP(s):{RESET}")
+                for r in results:
+                    print(f"      {GREEN}{r['ip']}{RESET}  in {CYAN}{r.get('repo', '?')}{RESET}")
+                    print(f"        file: {DIM}{r.get('path', '?')}{RESET}")
+                    ctx = r.get("context", "")
+                    if ctx:
+                        print(f"        {DIM}{ctx[:120]}{RESET}")
+                    if r.get("url"):
+                        print(f"        {DIM}{r['url']}{RESET}")
+            else:
+                print(f"  {DIM}No leaked IPs found on GitHub for {domain}{RESET}")
+                print(f"  {DIM}(GitHub rate-limits unauthenticated searches){RESET}")
+            print()
+
+        # Censys
+        if args.censys is not None:
+            if not api_keys.get("censys_api_id") or not api_keys.get("censys_api_secret"):
+                print(f"  {RED}[!] Censys API keys not configured{RESET}")
+                print(f"  {DIM}Set CENSYS_API_ID and CENSYS_API_SECRET or run: wtw --api-init{RESET}")
+                report["sources"]["censys"] = {"error": "API keys not configured"}
+            else:
+                if args.censys == "auto":
+                    print(f"{CYAN}[*] Censys cert search: {domain}{RESET}", file=sys.stderr)
+                    results = origin_finder.search_censys(domain, timeout=args.timeout)
+                else:
+                    print(f"{CYAN}[*] Censys query: {args.censys}{RESET}", file=sys.stderr)
+                    results = origin_finder.search_censys_query(args.censys, timeout=args.timeout)
+                report["sources"]["censys"] = results
+                _print_censys_results(results, domain)
+            print()
+
+        # Shodan
+        if args.shodan is not None:
+            if not api_keys.get("shodan_api_key"):
+                print(f"  {RED}[!] Shodan API key not configured{RESET}")
+                print(f"  {DIM}Set SHODAN_API_KEY or run: wtw --api-init{RESET}")
+                report["sources"]["shodan"] = {"error": "API key not configured"}
+            else:
+                if args.shodan == "auto":
+                    print(f"{CYAN}[*] Shodan domain: {domain}{RESET}", file=sys.stderr)
+                    results = origin_finder.search_shodan_domain(domain, timeout=args.timeout)
+                    report["sources"]["shodan"] = results
+                    _print_shodan_domain_results(results, domain)
+                else:
+                    print(f"{CYAN}[*] Shodan query: {args.shodan}{RESET}", file=sys.stderr)
+                    results = origin_finder.search_shodan_query(args.shodan, timeout=args.timeout)
+                    report["sources"]["shodan"] = results
+                    _print_shodan_query_results(results)
+            print()
+
+        # VirusTotal
+        if args.virustotal:
+            print(f"{CYAN}[*] VirusTotal: {domain}{RESET}", file=sys.stderr)
+            if not api_keys.get("virustotal_api_key"):
+                print(f"  {RED}[!] VirusTotal API key not configured{RESET}")
+                print(f"  {DIM}Set VIRUSTOTAL_KEY or run: wtw --api-init{RESET}")
+                report["sources"]["virustotal"] = {"error": "API key not configured"}
+            else:
+                results = origin_finder.search_virustotal(domain, timeout=args.timeout)
+                report["sources"]["virustotal"] = results
+                if results:
+                    print(f"\n  {BOLD}VirusTotal Resolutions{RESET}")
+                    print(f"    {GREEN}Found {len(results)} historical IP(s):{RESET}")
+                    for r in results:
+                        seen = r.get("last_seen", "")
+                        if isinstance(seen, int) and seen > 0:
+                            import datetime
+                            seen = datetime.datetime.utcfromtimestamp(seen).strftime("%Y-%m-%d")
+                        seen_str = f"  {DIM}last seen: {seen}{RESET}" if seen else ""
+                        print(f"      {GREEN}{r['ip']:<16}{RESET}{seen_str}")
+                else:
+                    print(f"  {DIM}No resolutions found on VirusTotal for {domain}{RESET}")
+            print()
+
+        # SecurityTrails
+        if args.securitytrails:
+            print(f"{CYAN}[*] SecurityTrails: {domain}{RESET}", file=sys.stderr)
+            if not api_keys.get("securitytrails_key"):
+                print(f"  {RED}[!] SecurityTrails API key not configured{RESET}")
+                print(f"  {DIM}Set SECURITYTRAILS_KEY or run: wtw --api-init{RESET}")
+                report["sources"]["securitytrails"] = {"error": "API key not configured"}
+            else:
+                results = origin_finder._securitytrails_history(domain, timeout=args.timeout)
+                report["sources"]["securitytrails"] = results
+                if results:
+                    print(f"\n  {BOLD}SecurityTrails Historical DNS{RESET}")
+                    print(f"    {GREEN}Found {len(results)} historical A record(s):{RESET}")
+                    for r in results:
+                        owner = r.get("owner", "")
+                        owner_str = f"  {DIM}{owner}{RESET}" if owner else ""
+                        seen = r.get("last_seen", "")
+                        seen_str = f"  {DIM}last seen: {seen}{RESET}" if seen else ""
+                        print(f"      {GREEN}{r['ip']:<16}{RESET}{owner_str}{seen_str}")
+                else:
+                    print(f"  {DIM}No historical records found on SecurityTrails for {domain}{RESET}")
+            print()
+
+        # Whoxy
+        if args.whoxy:
+            print(f"{CYAN}[*] Whoxy WHOIS: {domain}{RESET}", file=sys.stderr)
+            if not api_keys.get("whoxy_api_key"):
+                print(f"  {RED}[!] Whoxy API key not configured{RESET}")
+                print(f"  {DIM}Set WHOXY_API_KEY or run: wtw --api-init{RESET}")
+                report["sources"]["whoxy"] = {"error": "API key not configured"}
+            else:
+                whoxy = origin_finder.search_whoxy(domain, timeout=args.timeout)
+                report["sources"]["whoxy"] = whoxy
+                whois = whoxy.get("whois", {})
+                if whois:
+                    print(f"\n  {BOLD}Whoxy WHOIS{RESET}")
+                    if whois.get("registrar"):
+                        print(f"    Registrar: {whois['registrar']}")
+                    if whoxy.get("registrant_email"):
+                        print(f"    Email:     {whoxy['registrant_email']}")
+                    if whoxy.get("registrant_name"):
+                        print(f"    Name:      {whoxy['registrant_name']}")
+                    if whoxy.get("registrant_company"):
+                        print(f"    Company:   {whoxy['registrant_company']}")
+                siblings = whoxy.get("sibling_domains", [])
+                if siblings:
+                    print(f"\n    {BOLD}Sibling Domains ({len(siblings)} by same registrant):{RESET}")
+                    for s in siblings[:15]:
+                        print(f"      {CYAN}{s}{RESET}")
+                    if len(siblings) > 15:
+                        print(f"      {DIM}... and {len(siblings) - 15} more{RESET}")
+                ips = whoxy.get("ips", [])
+                if ips:
+                    print(f"\n    {GREEN}Resolved {len(ips)} IP(s) from sibling domains:{RESET}")
+                    for r in ips:
+                        print(f"      {GREEN}{r['ip']:<16}{RESET}  via {CYAN}{r.get('sibling_domain', '?')}{RESET}")
+                elif siblings:
+                    print(f"    {DIM}All sibling domains resolved to CDN IPs{RESET}")
+                elif not whois:
+                    print(f"  {DIM}No WHOIS data found for {domain}{RESET}")
+                else:
+                    print(f"  {DIM}WHOIS privacy enabled — no reverse WHOIS possible{RESET}")
+            print()
+
+        # Summary
+        all_ips = {}
+        for source_name, source_data in report["sources"].items():
+            if isinstance(source_data, dict) and "error" in source_data:
+                continue
+            # Handle different data shapes
+            if isinstance(source_data, list):
+                items = source_data
+            elif isinstance(source_data, dict):
+                items = source_data.get("results", source_data.get("ips", []))
+            else:
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                ip = item.get("ip", "")
+                if ip:
+                    if ip not in all_ips:
+                        all_ips[ip] = []
+                    all_ips[ip].append(source_name)
+
+        if all_ips and not is_json:
+            print(f"  {BOLD}{'=' * 55}{RESET}")
+            print(f"  {BOLD}Summary: {len(all_ips)} unique IP(s) for {domain}{RESET}")
+            print(f"  {BOLD}{'=' * 55}{RESET}")
+            for ip, sources in sorted(all_ips.items()):
+                src_str = ", ".join(sources)
+                print(f"    {GREEN}{ip:<16}{RESET}  via {YELLOW}{src_str}{RESET}")
+            ip_list = ",".join(all_ips.keys())
+            print(f"\n  {BOLD}Test for bypass:{RESET}")
+            print(f"    {CYAN}wtw {domain} --direct-ip {ip_list}{RESET}")
+            print()
+
+        report["unique_ips"] = [{"ip": ip, "sources": srcs} for ip, srcs in all_ips.items()]
+        all_results.append(report)
+
+    if is_json:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+
+
+def _run_favicon_standalone(value, args, is_json):
+    """Handle --favicon with a URL or hash value (no target needed)."""
+    from .modules import origin_finder, api_keys
+
+    # Determine if value is a hash (integer) or a URL
+    fav = None
+    try:
+        fav_hash = int(value)
+        fav = {"hash": fav_hash, "hash_str": str(fav_hash), "favicon_url": "(provided)", "size": 0}
+    except ValueError:
+        # It's a URL — fetch and hash it
+        print(f"{CYAN}[*] Fetching favicon from {value}{RESET}", file=sys.stderr)
+        fav = origin_finder.fetch_favicon_hash_from_url(value, timeout=args.timeout)
+        if not fav:
+            print(f"  {RED}[!] Could not fetch favicon from {value}{RESET}")
+            try:
+                import mmh3 as _
+            except ImportError:
+                print(f"  {DIM}Install mmh3: pip install mmh3{RESET}")
+            return
+
+    _print_favicon_result(fav, api_keys)
+    results = origin_finder.search_by_favicon_hash(fav["hash"], timeout=args.timeout)
+    _print_favicon_search_results(results, api_keys)
+
+    if is_json:
+        output = {"favicon": fav, "results": results}
+        _write_output(json.dumps(output, indent=2, default=str), args.output)
+    print()
+
+
+def _print_favicon_result(fav, api_keys):
+    """Print favicon hash info."""
+    print(f"\n  {BOLD}Favicon Hash{RESET}")
+    if fav.get("favicon_url") and fav["favicon_url"] != "(provided)":
+        print(f"    URL:  {fav['favicon_url']}")
+    print(f"    Hash: {BOLD}{fav['hash']}{RESET}")
+    if fav.get("size"):
+        print(f"    Size: {fav['size']} bytes")
+    print(f"    {DIM}Shodan dork: http.favicon.hash:{fav['hash']}{RESET}")
+    print(f"    {DIM}FOFA query:  icon_hash=\"{fav['hash']}\"{RESET}")
+
+
+def _print_favicon_search_results(results, api_keys):
+    """Print favicon search engine results."""
+    if results:
+        print(f"\n    {GREEN}Found {len(results)} host(s) with same favicon:{RESET}")
+        for r in results:
+            port_str = f":{r['port']}" if r.get("port") else ""
+            org_str = f"  {DIM}{r['org']}{RESET}" if r.get("org") else ""
+            hosts = ", ".join(r.get("hostnames", [])[:3])
+            host_str = f"  {DIM}({hosts}){RESET}" if hosts else ""
+            print(f"      {GREEN}{r['ip']}{port_str}{RESET}  via {YELLOW}{r['source']}{RESET}{org_str}{host_str}")
+    else:
+        configured = []
+        if api_keys.get("shodan_api_key"): configured.append("Shodan")
+        if api_keys.get("fofa_email") and api_keys.get("fofa_key"): configured.append("FOFA")
+        if api_keys.get("zoomeye_key"): configured.append("ZoomEye")
+        if configured:
+            print(f"    {DIM}No matches found on {', '.join(configured)}{RESET}")
+        else:
+            print(f"    {YELLOW}No search engine API keys configured. Run: wtw --api-status{RESET}")
+
+
+def _run_shodan_raw(query, args, is_json):
+    """Run a raw Shodan search query (no target needed)."""
+    from .modules import origin_finder, api_keys
+
+    if not api_keys.get("shodan_api_key"):
+        print(f"  {RED}[!] Shodan API key not configured{RESET}")
+        print(f"  {DIM}Set SHODAN_API_KEY or run: wtw --api-init{RESET}")
+        return
+
+    print(f"{CYAN}[*] Shodan query: {query}{RESET}", file=sys.stderr)
+    results = origin_finder.search_shodan_query(query, timeout=args.timeout)
+    _print_shodan_query_results(results)
+    print()
+
+    if is_json:
+        _write_output(json.dumps({"query": query, "results": results}, indent=2, default=str), args.output)
+
+
+def _run_censys_raw(query, args, is_json):
+    """Run a raw Censys search query (no target needed)."""
+    from .modules import origin_finder, api_keys
+
+    if not api_keys.get("censys_api_id") or not api_keys.get("censys_api_secret"):
+        print(f"  {RED}[!] Censys API keys not configured{RESET}")
+        print(f"  {DIM}Set CENSYS_API_ID and CENSYS_API_SECRET or run: wtw --api-init{RESET}")
+        return
+
+    print(f"{CYAN}[*] Censys query: {query}{RESET}", file=sys.stderr)
+    results = origin_finder.search_censys_query(query, timeout=args.timeout)
+    _print_censys_results(results, None)
+    print()
+
+    if is_json:
+        _write_output(json.dumps({"query": query, "results": results}, indent=2, default=str), args.output)
+
+
+def _print_censys_results(results, domain):
+    """Print Censys search results."""
+    label = f"for {domain}" if domain else ""
+    if results:
+        print(f"\n  {BOLD}Censys Results{RESET}")
+        print(f"    {GREEN}Found {len(results)} host(s) {label}:{RESET}")
+        for r in results:
+            services = ", ".join(r.get("services", [])[:5]) or "?"
+            asn_desc = r.get("autonomous_system", "")
+            asn_str = f"  {DIM}{asn_desc}{RESET}" if asn_desc else ""
+            print(f"      {GREEN}{r['ip']}{RESET}  services: {CYAN}{services}{RESET}{asn_str}")
+    else:
+        print(f"  {DIM}No results found on Censys {label}{RESET}")
+
+
+def _print_shodan_domain_results(results, domain):
+    """Print Shodan domain DNS results."""
+    if results:
+        print(f"\n  {BOLD}Shodan Domain Records{RESET}")
+        print(f"    {GREEN}Found {len(results)} A record(s):{RESET}")
+        for r in results:
+            sub = r.get("subdomain", "")
+            fqdn = f"{sub}.{domain}" if sub else domain
+            seen = r.get("last_seen", "")
+            seen_str = f"  {DIM}last seen: {seen}{RESET}" if seen else ""
+            print(f"      {GREEN}{r['ip']:<16}{RESET}  {CYAN}{fqdn}{RESET}{seen_str}")
+    else:
+        print(f"  {DIM}No records found on Shodan for {domain}{RESET}")
+
+
+def _print_shodan_query_results(results):
+    """Print Shodan raw query results."""
+    if results:
+        print(f"\n  {BOLD}Shodan Search Results{RESET}")
+        print(f"    {GREEN}Found {len(results)} host(s):{RESET}")
+        for r in results:
+            port_str = f":{r['port']}" if r.get("port") else ""
+            org_str = f"  {DIM}{r['org']}{RESET}" if r.get("org") else ""
+            hosts = ", ".join(r.get("hostnames", [])[:3])
+            host_str = f"  {DIM}({hosts}){RESET}" if hosts else ""
+            product = r.get("product", "")
+            prod_str = f"  {CYAN}{product}{RESET}" if product else ""
+            print(f"      {GREEN}{r['ip']}{port_str}{RESET}{org_str}{prod_str}{host_str}")
+    else:
+        print(f"  {DIM}No results found on Shodan{RESET}")
+
+
+def _run_api_status():
+    """Show which API keys are configured."""
+    from .modules import api_keys
+
+    print(f"\n{BOLD}API Key Status{RESET}")
+    print("=" * 55)
+
+    key_status = api_keys.status()
+    labels = {
+        "shodan_api_key": "Shodan",
+        "censys_api_id": "Censys (ID)",
+        "censys_api_secret": "Censys (Secret)",
+        "fofa_email": "FOFA (Email)",
+        "fofa_key": "FOFA (Key)",
+        "zoomeye_key": "ZoomEye",
+        "securitytrails_key": "SecurityTrails",
+        "virustotal_api_key": "VirusTotal",
+        "chinaz_api_key": "Chinaz",
+        "passivetotal_username": "PassiveTotal (User)",
+        "passivetotal_key": "PassiveTotal (Key)",
+        "whoxy_api_key": "Whoxy",
+    }
+    for key_name, configured in key_status.items():
+        label = labels.get(key_name, key_name)
+        icon = f"{GREEN}✓{RESET}" if configured else f"{RED}✗{RESET}"
+        print(f"  {icon} {label:<25}")
+
+    print(f"\n  Config file: {CYAN}{api_keys.config_path()}{RESET}")
+    print(f"  {DIM}Env vars always override config file.{RESET}")
+    print(f"  {DIM}Run {CYAN}wtw --api-init{RESET}{DIM} to create template config.{RESET}")
+    print()
+
+
+def _run_api_init():
+    """Create template API key config file."""
+    from .modules import api_keys
+
+    path = api_keys.init_config()
+    if path:
+        print(f"{GREEN}[+] Created template config: {path}{RESET}")
+        print(f"  {DIM}Edit this file and add your API keys.{RESET}")
+        print(f"  {DIM}File permissions set to 600 (owner-only).{RESET}")
+    else:
+        existing = api_keys.config_path()
+        print(f"{YELLOW}[!] Config file already exists: {existing}{RESET}")
+        print(f"  {DIM}Edit it directly to update your keys.{RESET}")
+    print()
 
 
 def _run_waf_scan(targets, args):
@@ -766,7 +1544,7 @@ def _run_direct_ip(targets, args):
                     seen_ips.add(c["ip"])
                     test_ips.append({"ip": c["ip"], "source": c.get("source", "subdomain")})
 
-            # Historical DNS
+            # Historical DNS (ViewDNS + SecurityTrails)
             status_cb("history", "Historical DNS lookup")
             sys.stderr.write("\r\033[K"); sys.stderr.flush()
             historical = origin_finder.fetch_historical_ips(domain)
@@ -774,7 +1552,56 @@ def _run_direct_ip(targets, args):
             for h in historical:
                 if h["ip"] not in seen_ips:
                     seen_ips.add(h["ip"])
-                    test_ips.append({"ip": h["ip"], "source": f"historical ({h.get('last_seen', '?')})"})
+                    src = h.get("source", "historical")
+                    test_ips.append({"ip": h["ip"], "source": f"{src} ({h.get('last_seen', '?')})"})
+
+            # Favicon hash matching (Shodan/FOFA/ZoomEye)
+            status_cb("origins", "Favicon hash matching")
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            fav = origin_finder.fetch_favicon_hash(domain)
+            if fav:
+                fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain)
+                for r in fav_results:
+                    if r["ip"] not in seen_ips:
+                        seen_ips.add(r["ip"])
+                        test_ips.append({"ip": r["ip"], "source": f"favicon:{r['source']}"})
+
+            # Censys certificate search
+            status_cb("origins", "Censys certificate search")
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            censys_results = origin_finder.search_censys(domain)
+            for r in censys_results:
+                if r["ip"] not in seen_ips:
+                    seen_ips.add(r["ip"])
+                    test_ips.append({"ip": r["ip"], "source": "censys"})
+
+            # GitHub leak search
+            status_cb("origins", "GitHub repository leak search")
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            github_results = origin_finder.search_github_leaks(domain)
+            for r in github_results:
+                if r["ip"] not in seen_ips:
+                    seen_ips.add(r["ip"])
+                    test_ips.append({"ip": r["ip"], "source": f"github ({r.get('repo', '?')})"})
+
+            # Shodan DNS records
+            status_cb("origins", "Shodan domain search")
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            shodan_results = origin_finder.search_shodan_domain(domain)
+            for r in shodan_results:
+                if r["ip"] not in seen_ips:
+                    seen_ips.add(r["ip"])
+                    sub = r.get("subdomain", "")
+                    test_ips.append({"ip": r["ip"], "source": f"shodan ({sub})" if sub else "shodan"})
+
+            # VirusTotal resolutions
+            status_cb("origins", "VirusTotal domain lookup")
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            vt_results = origin_finder.search_virustotal(domain)
+            for r in vt_results:
+                if r["ip"] not in seen_ips:
+                    seen_ips.add(r["ip"])
+                    test_ips.append({"ip": r["ip"], "source": "virustotal"})
 
             if not test_ips:
                 print(f"{YELLOW}[!] No origin IP candidates found for {domain}{RESET}", file=sys.stderr)

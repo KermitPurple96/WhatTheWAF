@@ -207,6 +207,42 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         status("history", "Historical DNS lookup")
         report["historical_ips"] = origin_finder.fetch_historical_ips(domain)
 
+    # 10b. Favicon hash origin discovery
+    if _should_run("subs") and report["cdn_detected"]:
+        status("origins", "Favicon hash matching")
+        fav = origin_finder.fetch_favicon_hash(domain, timeout=timeout)
+        if fav:
+            report["favicon_hash"] = fav
+            fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain, timeout=timeout)
+            for r in fav_results:
+                if r["ip"] not in {c["ip"] for c in report["origin_candidates"]}:
+                    report["origin_candidates"].append({
+                        "ip": r["ip"], "source": f"favicon:{r['source']}",
+                        "subdomain": "", "asn_info": None, "is_cdn": False,
+                    })
+
+    # 10c. Censys certificate search
+    if _should_run("subs") and report["cdn_detected"]:
+        status("origins", "Censys certificate search")
+        censys_results = origin_finder.search_censys(domain, timeout=timeout)
+        for r in censys_results:
+            if r["ip"] not in {c["ip"] for c in report["origin_candidates"]} and r["ip"] not in cdn_ips:
+                report["origin_candidates"].append({
+                    "ip": r["ip"], "source": "censys",
+                    "subdomain": "", "asn_info": None, "is_cdn": False,
+                })
+
+    # 10d. GitHub leak search
+    if _should_run("subs") and report["cdn_detected"]:
+        status("origins", "GitHub leak search")
+        github_results = origin_finder.search_github_leaks(domain, timeout=timeout)
+        for r in github_results:
+            if r["ip"] not in {c["ip"] for c in report["origin_candidates"]} and r["ip"] not in cdn_ips:
+                report["origin_candidates"].append({
+                    "ip": r["ip"], "source": f"github:{r.get('repo', '')}",
+                    "subdomain": "", "asn_info": None, "is_cdn": False,
+                })
+
     # 11. WAF bypass testing
     if _should_run("bypass"):
         bypass_ips = []

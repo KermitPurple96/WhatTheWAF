@@ -9,3 +9,5 @@ venv/
 .env
 *.json
 !requirements.txt
+.whatthewaf_keys
+api_keys.conf

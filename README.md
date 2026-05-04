@@ -1,6 +1,6 @@
-# WhatTheWAF v2.0
+# WhatTheWAF v3.1.0
 
-WAF/CDN Detection | WAF Bypass | TLS Fingerprint Evasion
+WAF/CDN Detection | WAF Bypass | Origin Discovery | TLS Fingerprint Evasion
 
 ## Install
 
@@ -8,6 +8,9 @@ WAF/CDN Detection | WAF Bypass | TLS Fingerprint Evasion
 git clone https://github.com/KermitPurple96/WhatTheWAF.git
 cd WhatTheWAF
 pip install -e .
+
+# Optional: favicon hash matching
+pip install mmh3
 ```
 
 Both `whatthewaf` and `wtw` commands are available after install.
@@ -29,6 +32,9 @@ wtw example.com --direct-ip 1.2.3.4
 wtw example.com --direct-ip 1.2.3.4,5.6.7.8 --path /login
 wtw example.com --direct-ip auto
 
+# Deep WAF vulnerability scan (10 layers)
+wtw example.com --waf-scan
+
 # WAF evasion analysis
 wtw example.com --evasion
 
@@ -40,6 +46,103 @@ wtw example.com --proton --evasion
 
 # JSON output
 wtw example.com --json -o report.json
+```
+
+## How It Works
+
+WhatTheWAF is a modular WAF/CDN reconnaissance and bypass toolkit. Here's what happens when you run a scan:
+
+### Detection Pipeline
+
+1. **DNS Resolution** -- Resolves the target domain and extracts A records + CNAME chains. CNAMEs often reveal the CDN (e.g. `example.com.cdn.cloudflare.net`).
+
+2. **ASN Classification** -- Each resolved IP is looked up against a database of 50+ WAF/CDN providers and 30+ hosting providers. This tells you whether traffic goes through a proxy (Cloudflare, Akamai) or directly to an origin server (AWS, Hetzner).
+
+3. **WAF Signature Matching** -- HTTP response headers, cookies, and body content are matched against 90+ WAF/CDN signatures. For example, a `cf-ray` header means Cloudflare, a `__cfduid` cookie means Cloudflare, an `X-Sucuri-ID` header means Sucuri.
+
+4. **Error Page Probing** -- Requests 404, 403, 500, and WAF-trigger paths (like `/../../etc/passwd`). WAFs often reveal themselves on error pages even when the homepage looks clean.
+
+### Origin Discovery (finding the real IP)
+
+When a CDN/WAF is detected, the tool tries to find the origin server IP through multiple techniques:
+
+| Technique | How It Works | API Key Needed |
+|-----------|-------------|----------------|
+| **Subdomain leakage** | Resolves 35+ subdomains (mail, dev, staging, api, ftp, etc.) that are often not behind the CDN | No |
+| **SSL certificate inspection** | Connects to candidate IPs on port 443 and checks if the cert matches the target domain | No |
+| **Historical DNS** (ViewDNS) | Looks up old A records -- the IP before CDN migration is often still the origin | No |
+| **Historical DNS** (SecurityTrails) | Same concept, different data source with better coverage | Yes |
+| **Favicon hash matching** | Fetches the site's favicon, computes its MMH3 hash, then searches Shodan/FOFA/ZoomEye for other servers with the same favicon -- these are often the origin | Yes |
+| **GitHub leak search** | Searches GitHub code for the domain in config files, .env files, nginx/Apache configs that may contain hardcoded origin IPs | No (rate-limited) |
+| **Censys certificate search** | Finds all hosts that have a TLS certificate with the target domain name -- origin servers often have the same cert | Yes |
+| **Shodan DNS records** | Queries Shodan's passive DNS for subdomain A records | Yes |
+| **VirusTotal resolutions** | Historical domain-to-IP mappings from VirusTotal's passive DNS | Yes |
+| **Whoxy reverse WHOIS** | WHOIS lookup → registrant email → reverse WHOIS to find sibling domains → resolve for shared origin IPs | Yes |
+
+With `--direct-ip auto` or `--recon`, all available techniques run in sequence, collect candidate IPs, deduplicate them, and correlate across sources. `--recon` ranks IPs by how many sources found them.
+
+### WAF Bypass Verification
+
+Once candidate origin IPs are found, the tool verifies bypass by:
+
+1. Fetching the page normally through the CDN → gets a body hash
+2. Connecting directly to the candidate IP with `Host: target.com` header → gets another body hash
+3. Comparing the two hashes:
+   - **Same hash** + DNS goes through WAF → **WAF BYPASS CONFIRMED**
+   - **Same hash** + DNS goes to hosting → **DIRECT ACCESS CONFIRMED**
+   - **Different hash** + default/parking page detected → **DEFAULT VHOST** (false positive)
+   - **Different hash** + real content (200/301/302) → **WAF BYPASS LIKELY**
+
+Default vhost detection prevents false positives from shared hosting servers that respond to any Host header with a parking page.
+
+### WAF Evasion Analysis (`--evasion`)
+
+Tests what the WAF actually inspects:
+- **User-Agent sensitivity** -- sends requests with Chrome, Firefox, curl, sqlmap, Nikto UAs to see which get blocked
+- **HTTP method restrictions** -- tests GET, POST, PUT, DELETE, TRACE, OPTIONS, PATCH, etc.
+- **Encoding bypasses** -- tries URL-encoded, double URL-encoded, Unicode, null-byte, and mixed-case variants
+- **Rate limiting** -- measures how many requests before the WAF starts blocking
+- **HTTP version** -- tests HTTP/1.0 vs 1.1 acceptance
+
+### Deep WAF Vulnerability Scanner (`--waf-scan`)
+
+A 10-layer analysis framework that tests the WAF itself for weaknesses:
+
+| Layer | What It Tests |
+|-------|--------------|
+| Network | Virtual host bypass, sensitive path probing, Host header manipulation |
+| Rule Engine | SQLi, XSS, RCE, LFI payloads to find detection gaps |
+| Rate Limiting | Burst and sustained request enforcement thresholds |
+| Evasion | 10 encoding variants per payload to find bypasses |
+| Behavioral | Tarpit detection, JavaScript challenge analysis, back-off timing |
+| Header | IP spoofing via X-Forwarded-For, X-Real-IP, CF-Connecting-IP |
+| TLS | Version probing, SNI bypass, certificate fingerprinting |
+| HTTP Method | Verb-based bypass including WebDAV methods |
+| Session | Cookie manipulation, authentication bypass, session fixation |
+| Misconfiguration | Version leakage, information disclosure, config errors |
+
+### Stealth & Evasion Stack
+
+Multiple layers can be combined for maximum stealth:
+
+| Layer | Module | What It Does |
+|-------|--------|-------------|
+| IP | `proxy_manager` / `tor_rotator` | Rotate exit IP via ProtonVPN, Tor, or proxy pool |
+| TCP | `tcp_fingerprint` / `tcp_options` | Change TTL, window size, SACK to look like Windows/macOS |
+| TLS | `tls_rotator` | Rotate JA3/JA4 fingerprint per request (Chrome, Firefox, Safari, Edge profiles) |
+| HTTP/2 | `h2_fingerprint` / `http2_fingerprint` | Rotate SETTINGS frames, header order, priority weights |
+| HTTP | `proxy_mode` | Rewrite headers, strip tool signatures, add browser-like patterns |
+| Source Port | `source_port` | Use trusted ports (80, 443, 53) or browser-range ports to evade tracking |
+| JS Challenges | `headless_browser` | Solve Cloudflare Turnstile, DataDome, PerimeterX with stealth Playwright |
+| MITM | `mitm_proxy` | Full HTTPS interception with dynamic per-host certificate generation |
+| CF Headers | `cf_header_inject` | Test if WAF trusts spoofed Cloudflare internal headers |
+| Auto-retry | `response_advisor` | Escalating retry strategies when WAF blocks (UA swap, delay, header spoof) |
+
+```bash
+# Full stealth: all layers combined
+sudo wtw --tcp-profile windows                                          # Terminal 1
+wtw --proxy-mode --proton --tls-rotate --h2-rotate --random-delay 2     # Terminal 2
+wtw target.com --proxy http://127.0.0.1:8888 --evasion                  # Terminal 3
 ```
 
 ## Flags
@@ -80,8 +183,8 @@ Available modules for `--only`:
 | `evasion` | WAF evasion analysis (User-Agent, encoding, methods) |
 | `bypass` | WAF bypass testing via direct IP access |
 | `cert` | SSL certificate inspection (CDN-issued detection) |
-| `subs` | Subdomain origin leakage scan |
-| `history` | Historical DNS record lookup |
+| `subs` | Subdomain origin leakage + favicon hash + Censys + GitHub leaks |
+| `history` | Historical DNS record lookup (ViewDNS + SecurityTrails) |
 | `proxy` | Proxy effectiveness testing against WAF |
 
 Examples:
@@ -115,6 +218,105 @@ wtw example.com --only evasion
 --history                Check historical DNS records
 ```
 
+### Full OSINT Recon (`--recon`)
+
+```
+--recon                  Run ALL OSINT sources, correlate IPs, classify CDN vs origin
+```
+
+Runs every available source in sequence (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy), then:
+- ASN-classifies every IP (CDN vs origin vs hosting)
+- Cross-references which sources found each IP
+- Ranks by confidence (more sources = higher confidence)
+- Gives a ready `--direct-ip` command for the best candidates
+
+```bash
+wtw example.com --recon
+wtw example.com --recon --json -o recon.json
+```
+
+Output:
+
+```
+  Sources Queried
+    ✓ dns                  2 result(s)
+    · subdomains           0 result(s)
+    ✓ shodan               4 result(s)
+    ✓ virustotal           24 result(s)
+    ...
+
+  Correlated IPs (24 unique)
+  ─────────────────────────────────────────────────────────
+  IP                ASN        Provider           Type     #Src  Sources
+  104.20.23.154     AS13335    CLOUDFLARENET       CDN      3    dns, shodan, virustotal
+  93.184.216.34     ?          NA                  ORIGIN?  1    virustotal
+  ...
+
+  Analysis
+    CDN/WAF IPs: 104.20.23.154, 172.66.147.243
+    High confidence origins (2+ sources):
+      93.184.216.34     (2 sources: shodan, virustotal)
+    Low confidence (1 source):
+      1.2.3.4           (virustotal)
+
+  Next Steps
+    wtw example.com --direct-ip 93.184.216.34,1.2.3.4
+```
+
+### Individual OSINT Tools
+
+Run each discovery source individually. Each flag accepts an optional argument for direct queries without needing a target domain.
+
+```
+--favicon [URL|HASH]     No arg: hash target's favicon. URL: fetch & hash. Number: search by hash.
+--github-leaks           Search GitHub for leaked origin IPs in configs/.env
+--censys [QUERY]         No arg: cert search for target. String: raw Censys query.
+--shodan [QUERY]         No arg: domain DNS records. String: raw Shodan host search.
+--virustotal             VirusTotal domain resolution history
+--securitytrails         SecurityTrails historical DNS A records
+--whoxy                  WHOIS + reverse WHOIS → sibling domains → shared origin IPs
+```
+
+```bash
+# With a target domain (auto-detect favicon, search domain records)
+wtw example.com --favicon
+wtw example.com --shodan
+wtw example.com --censys
+
+# Favicon: fetch from a specific URL and search by its hash
+wtw --favicon https://target.com/assets/icon.png
+
+# Favicon: search by a known MMH3 hash directly
+wtw --favicon 708578229
+
+# Shodan/Censys: raw queries (no target needed)
+wtw --shodan 'http.title:"Login" port:443 country:US'
+wtw --shodan 'ssl.cert.subject.cn:example.com'
+wtw --censys 'services.tls.certificates.leaf.names: example.com'
+
+# Combine multiple sources against a target
+wtw example.com --favicon --shodan --virustotal --censys
+
+# All sources at once
+wtw example.com --favicon --github-leaks --censys --shodan --virustotal --securitytrails
+
+# JSON output
+wtw example.com --shodan --virustotal --json -o osint.json
+```
+
+When run with a target, results include a combined summary with all unique IPs and a ready-to-paste `--direct-ip` command:
+
+```
+  Summary: 24 unique IP(s) for example.com
+  =======================================================
+    93.184.216.34     via virustotal
+    104.18.26.120     via shodan, virustotal
+    ...
+
+  Test for bypass:
+    wtw example.com --direct-ip 93.184.216.34,104.18.26.120,...
+```
+
 ### Direct IP Bypass PoC
 
 ```
@@ -124,11 +326,7 @@ wtw example.com --only evasion
 
 Connects to the specified IP with the `Host` header set to the target domain, bypassing DNS resolution and any CDN/WAF in front. Compares body hashes between CDN and direct response to confirm bypass.
 
-Determination logic:
-- **Same hash** + DNS via WAF → `WAF BYPASS CONFIRMED`
-- **Same hash** + DNS without WAF → `DIRECT ACCESS CONFIRMED`
-- **Different hash** + default vhost detected → `DEFAULT VHOST` (not a bypass)
-- **Different hash** + real content → `WAF BYPASS LIKELY` / `DIRECT ACCESS`
+With `--direct-ip auto`, the tool runs all available origin discovery techniques (subdomain leakage, historical DNS, favicon hash matching, Censys, Shodan, GitHub leaks, VirusTotal) and tests every candidate IP it finds.
 
 ```bash
 # Single IP
@@ -137,7 +335,7 @@ wtw example.com --direct-ip 203.0.113.50
 # Multiple IPs (comma-separated)
 wtw example.com --direct-ip 203.0.113.50,203.0.113.51,10.0.0.5
 
-# Auto-discover origin IPs (subdomain leakage + historical DNS) and test all
+# Auto-discover origin IPs from all sources and test all
 wtw example.com --direct-ip auto
 
 # Test specific path
@@ -148,6 +346,31 @@ wtw example.com --direct-ip auto --path /api/v1/health
 
 # Save PoC as JSON
 wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
+```
+
+### Deep WAF Vulnerability Scanner
+
+```
+--waf-scan               Run 10-layer WAF vulnerability scanner
+--waf-scan-layers LAYERS Scan specific layers (comma-separated)
+```
+
+```bash
+# Full 10-layer scan
+wtw example.com --waf-scan
+
+# Only test rule engine and evasion layers
+wtw example.com --waf-scan --waf-scan-layers ruleengine,evasion
+
+# Combine with stealth
+wtw example.com --waf-scan --tor --tls-rotate
+```
+
+### API Key Management
+
+```
+--api-status             Show which API keys are configured
+--api-init               Create template API key config file
 ```
 
 ### Proxy & VPN
@@ -169,6 +392,17 @@ wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
 --no-spoof-tls           Proxy mode: don't modify TLS fingerprint
 --proxy-verbose          Proxy mode: log all requests
 --random-delay SECS      Proxy mode: max random delay between requests
+--tor                    Use Tor for IP rotation
+--tor-password PASS      Tor control port password
+--cf-inject              Test Cloudflare header injection bypass
+--source-port PROFILE    Manipulate TCP source port (trusted/browser_linux/browser_windows/scanner_evasion/rotating)
+--tls-rotate             Rotate TLS fingerprint per request
+--h2-rotate              Rotate HTTP/2 SETTINGS fingerprint per request
+--tcp-options PROFILE    Set TCP SYN options (chrome/firefox/safari/edge/windows10/linux/random)
+--auto-retry             Auto-retry with different techniques when WAF blocks
+--proxy-pool FILE        File with proxy URLs for IP rotation pool
+--mitm                   Start MITM proxy with dynamic cert generation
+--tui                    Show real-time TUI dashboard
 ```
 
 ### TCP Fingerprint (p0f evasion)
@@ -196,7 +430,7 @@ wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
 ### Stealth Status
 
 ```
---stealth-status         Show status of all evasion capabilities
+--stealth-status         Show status of all evasion capabilities + API keys
 ```
 
 ### Request Tuning
@@ -207,6 +441,79 @@ wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
 --delay SECS             Delay between targets
 --workers N              Concurrent workers for batch scanning
 ```
+
+## API Keys
+
+Optional API keys unlock additional origin discovery sources. Keys are loaded from environment variables or a config file. **No keys are required** -- the tool works without them, but more keys = more origin discovery sources.
+
+```bash
+# Create template config
+wtw --api-init
+
+# Check which keys are configured
+wtw --api-status
+```
+
+### Config File
+
+Keys are stored in `~/.config/whatthewaf/api_keys.conf` (permissions 600, never uploaded to git):
+
+```ini
+[keys]
+shodan_api_key = YOUR_KEY
+censys_api_id = YOUR_ID
+censys_api_secret = YOUR_SECRET
+fofa_email = you@example.com
+fofa_key = YOUR_KEY
+zoomeye_key = YOUR_KEY
+securitytrails_key = YOUR_KEY
+virustotal_api_key = YOUR_KEY
+chinaz_api_key = YOUR_KEY
+passivetotal_username = you@example.com
+passivetotal_key = YOUR_KEY
+whoxy_api_key = YOUR_KEY
+```
+
+### Environment Variables
+
+Environment variables always override the config file:
+
+```bash
+export SHODAN_API_KEY=xxx
+export CENSYS_API_ID=xxx
+export CENSYS_API_SECRET=xxx
+export FOFA_EMAIL=xxx
+export FOFA_KEY=xxx
+export ZOOMEYE_KEY=xxx
+export SECURITYTRAILS_KEY=xxx
+export VIRUSTOTAL_KEY=xxx
+export CHINAZ_KEY=xxx
+export PASSIVETOTAL_USER=xxx
+export PASSIVETOTAL_KEY=xxx
+export WHOXY_API_KEY=xxx
+```
+
+### What Each Key Enables
+
+| Service | Used For | Free Tier |
+|---------|----------|-----------|
+| Shodan | Favicon hash search, domain DNS records, host lookup | Yes (limited) |
+| Censys | Certificate-based origin IP discovery | Yes (250 queries/month) |
+| FOFA | Favicon hash search (strong in Asia-Pacific) | Yes (limited) |
+| ZoomEye | Favicon hash search | Yes (limited) |
+| SecurityTrails | Historical DNS A records (better coverage than ViewDNS) | Yes (50 queries/month) |
+| VirusTotal | Domain resolution history (passive DNS) | Yes (500 queries/day) |
+| Whoxy | WHOIS + reverse WHOIS to find sibling domains sharing origin IPs | Yes (limited) |
+| Chinaz | Chinese domain/IP intelligence | Varies |
+| PassiveTotal | Passive DNS data | Yes (limited) |
+
+### Key Loading Priority
+
+1. **Environment variables** (highest priority -- always win)
+2. **Config file** (`~/.config/whatthewaf/api_keys.conf`)
+3. **Project-local file** (`.whatthewaf_keys` in the project directory)
+
+This means you can set keys in your shell profile for persistent use, or in CI/CD environment variables, and they'll override any config file.
 
 ## Usage Examples
 
@@ -229,7 +536,7 @@ cat subs.txt | wtw --stdin -m origins
 ### WAF Bypass Testing
 
 ```bash
-# Auto-discover and test all origin IPs
+# Auto-discover and test all origin IPs (uses all available API sources)
 wtw example.com --direct-ip auto
 
 # Test specific IPs
@@ -293,7 +600,7 @@ sudo apt install -y proton-vpn-cli
 
 The package is `proton-vpn-cli` and installs the binary as `/usr/bin/protonvpn`.
 
-> **Do NOT use** `pip install protonvpn-cli` — that's the old v2 CLI which no longer works (API returns 422).
+> **Do NOT use** `pip install protonvpn-cli` -- that's the old v2 CLI which no longer works (API returns 422).
 
 ```bash
 # 2. Sign in
@@ -340,15 +647,31 @@ With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
 
 | Module | Description |
 |--------|-------------|
-| waf_signatures | 90+ WAF/CDN vendor detection |
-| waf_bypass | Direct IP, alt ports, header spoofing, HTTP downgrade |
+| waf_signatures | 90+ WAF/CDN vendor detection from headers, cookies, body |
+| waf_bypass | Direct IP bypass, alt ports, header spoofing, HTTP downgrade |
 | waf_evasion | Detect what WAF checks: UA, encoding, methods, rate limiting |
-| tls_fingerprint | TLS config analysis, test which configs WAF accepts/rejects |
+| waf_vuln_scanner | 10-layer deep WAF vulnerability analysis |
+| tls_fingerprint | TLS config analysis, browser difference detection |
+| tls_rotator | Per-request JA3/JA4 TLS fingerprint rotation |
+| h2_fingerprint | HTTP/2 SETTINGS frame rotation across browser profiles |
+| http2_fingerprint | curl-impersonate integration for protocol-level browser emulation |
+| tcp_fingerprint | OS-level TCP stack modification (TTL, window, SACK) |
+| tcp_options | Scapy-based TCP SYN option manipulation |
+| source_port | Per-request source port manipulation |
 | proxy_manager | ProtonVPN integration, proxy chains, IP rotation |
-| error_pages | Probe 404/403/500/WAF trigger pages |
-| origin_finder | Subdomain leakage, historical DNS, SSL cert analysis |
+| proxy_mode | Stealth proxy with header rewriting and TLS spoofing |
+| proxy_pool | External proxy pool management with liveness probing |
+| tor_rotator | Multi-instance Tor IP rotation via NEWNYM |
+| mitm_proxy | Full HTTPS MITM with dynamic per-host cert generation |
+| headless_browser | Playwright-based JS challenge solving (Cloudflare, DataDome, PerimeterX) |
+| cf_header_inject | Cloudflare header trust testing (CF-Connecting-IP, CF-Ray, etc.) |
+| response_advisor | Escalating auto-retry strategies on WAF blocks |
+| tui_dashboard | Real-time terminal UI with live traffic and technique tracking |
+| origin_finder | Subdomain leakage, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy |
+| api_keys | API key management (config file + env vars) for 12 services |
+| error_pages | Probe 404/403/500/WAF trigger pages for signature leakage |
 | asn_lookup | ASN classification: 50+ WAF/CDN providers, 30+ hosting providers |
-| dns_resolver | DNS resolution |
+| dns_resolver | DNS resolution with CNAME chain extraction |
 
 ## WAF/CDN Provider Detection
 
@@ -358,4 +681,4 @@ The tool distinguishes between WAF/CDN proxies and plain hosting to accurately c
 
 **Hosting (direct access, not bypass):** AWS, Google Cloud, Azure, DigitalOcean, Linode, Vultr, Hetzner, OVH, Scaleway, Oracle Cloud, Rackspace, Contabo, Leaseweb, GoDaddy, Hostinger, and more.
 
-**Default vhost detection:** SiteGround, nginx default, Apache default, cPanel, Plesk, parking/propagation pages — automatically rejected as false positives.
+**Default vhost detection:** SiteGround, nginx default, Apache default, cPanel, Plesk, parking/propagation pages -- automatically rejected as false positives.
