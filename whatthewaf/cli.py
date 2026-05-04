@@ -1695,11 +1695,45 @@ def _run_direct_ip(targets, args):
                 print(f"{YELLOW}[!] All {len(test_ips)} IPs are CDN/WAF edges — no origin candidates to test{RESET}", file=sys.stderr)
                 continue
 
+            # Quick pre-filter: parallel TCP connect + lightweight probe to discard dead/unrelated IPs
+            if len(kept) > 3:
+                print(f"{CYAN}[*] Quick probe: {len(kept)} IPs (TCP:443 + Host header check)...{RESET}", file=sys.stderr)
+                probed = _quick_probe_ips([t["ip"] for t in kept], domain, timeout=min(args.timeout, 5))
+
+                alive = []
+                dead = []
+                wrong_host = []
+                for t in kept:
+                    probe = probed.get(t["ip"], {})
+                    if probe.get("error"):
+                        dead.append(t)
+                    elif probe.get("wrong_host"):
+                        wrong_host.append(t)
+                    else:
+                        t["probe_status"] = probe.get("status")
+                        t["probe_title"] = probe.get("title", "")
+                        alive.append(t)
+
+                if dead:
+                    print(f"  {DIM}Skipped {len(dead)} IP(s) — no response on port 443{RESET}", file=sys.stderr)
+                if wrong_host:
+                    print(f"  {DIM}Skipped {len(wrong_host)} IP(s) — responds but wrong host/default page{RESET}", file=sys.stderr)
+
+                if not alive:
+                    print(f"{YELLOW}[!] No IPs responded for {domain} on port 443{RESET}", file=sys.stderr)
+                    continue
+                kept = alive
+
             print(f"{GREEN}[+] Testing {len(kept)} origin candidate IP(s) for {domain}:{RESET}", file=sys.stderr)
             for t in kept:
                 asn = asn_map.get(t["ip"], {})
                 asn_str = f"AS{asn.get('asn', '?')}" if asn.get("asn") else ""
-                print(f"    {t['ip']:<16} via {t['source']:<35} {DIM}{asn_str}{RESET}", file=sys.stderr)
+                probe_info = ""
+                if t.get("probe_status"):
+                    probe_info = f" [{t['probe_status']}]"
+                    if t.get("probe_title"):
+                        probe_info += f" {t['probe_title'][:30]}"
+                print(f"    {t['ip']:<16} via {t['source']:<35} {DIM}{asn_str}{probe_info}{RESET}", file=sys.stderr)
             print(file=sys.stderr)
 
             ips = [t["ip"] for t in kept]
@@ -1733,6 +1767,78 @@ def _run_direct_ip(targets, args):
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
     elif args.output:
         _write_output(json.dumps(reports, indent=2, default=str), args.output)
+
+
+def _quick_probe_ips(ips, domain, timeout=5):
+    """Fast parallel probe: TCP connect to 443 + lightweight GET with Host header.
+
+    Returns dict: ip -> {status, title, error, wrong_host}
+    Runs all probes concurrently for speed.
+    """
+    import ssl
+    import re
+    import concurrent.futures
+    import httpx
+
+    default_page_signatures = {
+        "welcome to nginx", "apache2 default", "it works!", "test page",
+        "iis windows server", "default web site", "parking page",
+        "domain is not pointed", "cpanel", "plesk", "directadmin",
+        "congrats", "default page", "coming soon", "under construction",
+    }
+
+    def _probe_one(ip):
+        try:
+            # Single GET with Host header, no redirects, short timeout
+            with httpx.Client(
+                timeout=timeout, verify=False, follow_redirects=False,
+                headers={"Host": domain, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            ) as client:
+                resp = client.get(f"https://{ip}/")
+
+            status = resp.status_code
+            body = resp.text[:5000]
+            title = ""
+            m = re.search(r'<title[^>]*>(.*?)</title>', body, re.IGNORECASE | re.DOTALL)
+            if m:
+                title = m.group(1).strip()
+
+            # Check if this is a default/unrelated page
+            body_lower = body.lower()
+            title_lower = title.lower()
+            wrong_host = False
+            for sig in default_page_signatures:
+                if sig in body_lower or sig in title_lower:
+                    wrong_host = True
+                    break
+
+            # 4xx/5xx with no meaningful content = probably not our target
+            if status in (400, 421) and len(body) < 500:
+                wrong_host = True
+
+            return {"status": status, "title": title, "wrong_host": wrong_host}
+
+        except Exception as e:
+            err = str(e)
+            # Distinguish timeout from connection refused
+            if "timed out" in err.lower() or "timeout" in err.lower():
+                return {"error": "timeout"}
+            elif "refused" in err.lower():
+                return {"error": "refused"}
+            else:
+                return {"error": err[:50]}
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ips), 20)) as pool:
+        futures = {pool.submit(_probe_one, ip): ip for ip in ips}
+        for future in concurrent.futures.as_completed(futures, timeout=timeout + 10):
+            ip = futures[future]
+            try:
+                results[ip] = future.result()
+            except Exception:
+                results[ip] = {"error": "probe failed"}
+
+    return results
 
 
 def _print_direct_ip_summary(reports):
