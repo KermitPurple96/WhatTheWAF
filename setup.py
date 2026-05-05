@@ -31,7 +31,7 @@ class PostDevelop(develop):
 
 setup(
     name="whatthewaf",
-    version="3.1.0",
+    version="3.2.0",
     description="WAF/CDN Detection, Bypass, Origin Discovery & TLS Fingerprint Evasion",
     author="KermitPurple96",
     url="https://github.com/KermitPurple96/WhatTheWAF",

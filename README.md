@@ -1,6 +1,6 @@
-# WhatTheWAF v3.1.0
+# WhatTheWAF v3.2.0
 
-WAF/CDN Detection | WAF Bypass | Origin Discovery | TLS Fingerprint Evasion
+WAF/CDN Detection | WAF Bypass | Origin Discovery | Protocol-Level Evasion | HTTP/3 Probing
 
 ## Install
 
@@ -9,7 +9,7 @@ git clone https://github.com/KermitPurple96/WhatTheWAF.git
 cd WhatTheWAF
 pip install -e .
 
-# Optional: favicon hash matching + all extras
+# Optional: HTTP/3 QUIC, favicon hash, TLS impersonation + all extras
 pip install -e ".[full]"
 ```
 
@@ -34,14 +34,24 @@ wtw example.com --direct-ip 1.2.3.4
 wtw example.com --direct-ip 1.2.3.4,5.6.7.8 --path /login
 wtw example.com --direct-ip auto
 
-# Deep WAF vulnerability scan (10 layers)
+# Deep WAF vulnerability scan (10 layers, auto-stored for cross-session stats)
 wtw example.com --waf-scan
+
+# View statistical analysis from previous scans
+wtw example.com --scan-history
 
 # WAF evasion analysis
 wtw example.com --evasion
 
+# HTTP/3 protocol probe (find protocol-level WAF gaps)
+wtw example.com --h3
+wtw example.com --proto-probe
+
 # Origin IP classification
 wtw example.com -m origins
+
+# Stealth: encrypted DNS + browser header ordering
+wtw example.com --dot cloudflare --header-profile chrome --evasion
 
 # Scan through ProtonVPN
 wtw example.com --proton --evasion
