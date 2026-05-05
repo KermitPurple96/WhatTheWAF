@@ -126,6 +126,12 @@ def main():
                         help="Run deep WAF vulnerability scanner (10 layers)")
     parser.add_argument("--waf-scan-layers", metavar="LAYERS",
                         help="Scan specific layers (comma-separated): network,ruleengine,ratelimit,evasion,behavioural,header,tls,method,session,misconfig")
+    parser.add_argument("--no-persist", action="store_true",
+                        help="Don't store waf-scan results in history database")
+    parser.add_argument("--scan-history", action="store_true",
+                        help="Show scan history and statistical analysis for target domain")
+    parser.add_argument("--purge-history", action="store_true",
+                        help="Delete all stored scan history for target domain")
     parser.add_argument("--mitm", action="store_true",
                         help="Start MITM proxy with dynamic cert generation (full HTTPS interception)")
     parser.add_argument("--auto-retry", action="store_true",
@@ -228,6 +234,13 @@ def main():
 
     if not targets:
         parser.error("No targets specified.")
+
+    if args.scan_history:
+        _run_scan_history(targets, args)
+        return
+    if args.purge_history:
+        _run_purge_history(targets, args)
+        return
 
     if args.waf_scan:
         _run_waf_scan(targets, args)
@@ -690,6 +703,23 @@ def _run_recon(targets, args):
             x[1]["classification"] == "CDN",
             x[0],
         ))
+
+        # === PERSIST recon IPs for cross-session analysis ===
+        try:
+            from .modules.scan_persistence import ScanPersistence
+            db = ScanPersistence()
+            for ip, intel in ip_intel.items():
+                for source in intel["sources"]:
+                    db.store_recon_ip(
+                        domain=domain,
+                        ip=ip,
+                        source=source,
+                        classification=intel.get("classification"),
+                        provider=intel.get("provider"),
+                    )
+            db.close()
+        except Exception:
+            pass
 
         # === PRINT RESULTS ===
         if not is_json:
@@ -1273,11 +1303,126 @@ def _run_api_init():
     print()
 
 
+def _run_scan_history(targets, args):
+    """Show scan history and statistical analysis for a domain."""
+    from .modules.scan_persistence import ScanPersistence
+    import datetime
+
+    db = ScanPersistence()
+    is_json = args.json
+
+    all_results = []
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+
+        history = db.get_scan_history(domain)
+        finding_stats = db.get_finding_stats(domain)
+        ip_stats = db.get_ip_stats(domain)
+
+        result = {
+            "domain": domain,
+            "scan_history": history,
+            "finding_stats": [
+                {
+                    "title": s.title,
+                    "category": s.category,
+                    "layer": s.layer,
+                    "severity": s.severity,
+                    "times_seen": s.times_seen,
+                    "total_scans": s.total_scans,
+                    "hit_rate": round(s.hit_rate, 2),
+                    "stability": s.stability,
+                    "statistical_confidence": round(s.statistical_confidence, 3),
+                    "fp_verified": s.fp_verified,
+                    "first_seen": s.first_seen,
+                    "last_seen": s.last_seen,
+                }
+                for s in finding_stats
+            ],
+            "ip_stats": [
+                {
+                    "ip": s.ip,
+                    "sources": s.sources,
+                    "times_seen": s.times_seen,
+                    "confidence": round(s.confidence, 2),
+                    "classification": s.classification,
+                    "provider": s.provider,
+                    "bypass_confirmed": s.bypass_confirmed,
+                }
+                for s in ip_stats
+            ],
+        }
+        all_results.append(result)
+
+        if not is_json:
+            print(f"\n{BOLD}{CYAN}  Scan History: {domain}{RESET}")
+            print(f"  {'─' * 50}")
+
+            if not history:
+                print(f"  {DIM}No scan history found for this domain.{RESET}")
+                print(f"  Run: wtw {domain} --waf-scan")
+                continue
+
+            print(f"\n  {BOLD}Scans ({len(history)}):{RESET}")
+            for h in history[:10]:
+                ts = datetime.datetime.fromtimestamp(h["timestamp"]).strftime("%Y-%m-%d %H:%M")
+                print(f"    {DIM}{ts}{RESET}  {h['scan_type']:<10}  {h['total_findings']} findings  ({h.get('duration_seconds', 0):.1f}s)")
+
+            if finding_stats:
+                print(f"\n  {BOLD}Finding Statistics ({len(finding_stats)} unique):{RESET}")
+                # Show critical/high first
+                important = [s for s in finding_stats if s.severity in ("critical", "high", "medium")]
+                for s in important[:20]:
+                    stab_color = GREEN if s.stability == "stable" else YELLOW if s.stability == "intermittent" else RED if s.stability == "rare" else CYAN
+                    sev_color = RED if s.severity in ("critical", "high") else YELLOW
+                    fp_tag = f" {GREEN}[FP-clean]{RESET}" if s.fp_verified else ""
+                    print(
+                        f"    {sev_color}{s.severity:<8}{RESET} "
+                        f"{stab_color}{s.stability:<12}{RESET} "
+                        f"seen {s.times_seen}/{s.total_scans} "
+                        f"(conf: {s.statistical_confidence:.0%}){fp_tag}"
+                    )
+                    print(f"      {DIM}{s.title[:70]}{RESET}")
+
+            if ip_stats:
+                print(f"\n  {BOLD}Recon IPs ({len(ip_stats)} tracked):{RESET}")
+                for s in ip_stats[:15]:
+                    bypass_tag = f" {GREEN}[BYPASS]{RESET}" if s.bypass_confirmed else ""
+                    cls_tag = f" ({s.classification})" if s.classification else ""
+                    print(
+                        f"    {s.ip:<18} "
+                        f"seen {s.times_seen}x  "
+                        f"conf: {s.confidence:.0%}  "
+                        f"sources: {','.join(s.sources)}"
+                        f"{cls_tag}{bypass_tag}"
+                    )
+
+            print()
+
+    if is_json:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+
+    db.close()
+
+
+def _run_purge_history(targets, args):
+    """Delete scan history for a domain."""
+    from .modules.scan_persistence import ScanPersistence
+
+    db = ScanPersistence()
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        count = db.purge_domain(domain)
+        print(f"  {YELLOW}Purged {count} scan(s) for {domain}{RESET}")
+    db.close()
+
+
 def _run_waf_scan(targets, args):
     """Run deep WAF vulnerability scanner."""
     from .modules.waf_vuln_scanner import WAFVulnScanner
 
     is_json = args.json
+    persist = not args.no_persist
     layers = None
     if args.waf_scan_layers:
         layers = [l.strip() for l in args.waf_scan_layers.split(",")]
@@ -1295,7 +1440,7 @@ def _run_waf_scan(targets, args):
                 print(f"  {DIM}[*] Scanning layer: {layer}{RESET}", file=sys.stderr)
                 report[layer] = scanner.scan_layer(layer)
         else:
-            report = scanner.scan_all()
+            report = scanner.scan_all(persist=persist)
 
         all_reports.append({"target": domain, "report": report})
 
@@ -1331,17 +1476,68 @@ def _print_waf_scan_report(domain, report):
             if f.get("description"):
                 print(f"      {DIM}{f['description'][:100]}{RESET}")
             conf = f.get("confidence", 0)
-            verified = f"{GREEN}verified{RESET}" if f.get("verified") else f"{YELLOW}unverified{RESET}"
-            print(f"      Confidence: {conf:.0%} | {verified}")
+            # Build verification status string
+            v_parts = []
+            if f.get("verified"):
+                v_parts.append(f"{GREEN}verified{RESET}")
+            else:
+                v_parts.append(f"{YELLOW}unverified{RESET}")
+            if f.get("fp_verified"):
+                v_parts.append(f"{GREEN}FP-clean{RESET}")
+            v_str = " | ".join(v_parts)
+            print(f"      Confidence: {conf:.0%} | {v_str}")
 
     # Summary
+    summary = report.get("summary", {})
+    if summary:
+        fp_count = summary.get("fp_verified_count", 0)
+        verified_count = summary.get("verified_count", 0)
+        total = summary.get("total_findings", 0)
+        print(f"\n  {BOLD}── Summary ──{RESET}")
+        print(f"    Total: {total} | Verified: {verified_count} | FP-clean: {fp_count}")
+
     layer_results = report.get("layers", {})
     if layer_results:
         print(f"\n  {BOLD}── Layer Summary ──{RESET}")
         for layer_name, layer_data in layer_results.items():
-            count = len(layer_data.get("findings", []))
+            count = len(layer_data) if isinstance(layer_data, list) else 0
             icon = f"{RED}!" if count > 0 else f"{GREEN}✓"
             print(f"    {icon}{RESET} {layer_name:<15} {count} finding(s)")
+
+    # Cross-session statistics
+    stats = report.get("statistics", {})
+    if stats and not stats.get("error"):
+        total_scans = stats.get("total_scans_for_domain", 0)
+        if total_scans > 1:
+            print(f"\n  {BOLD}{CYAN}── Statistical Analysis (scan #{total_scans}) ──{RESET}")
+            new_count = stats.get("new_findings_this_scan", 0)
+            gone_count = stats.get("disappeared_from_previous", 0)
+            if new_count:
+                print(f"    {GREEN}+ {new_count} new finding(s) this scan{RESET}")
+            if gone_count:
+                print(f"    {YELLOW}- {gone_count} finding(s) disappeared (patched or intermittent){RESET}")
+
+            stability_data = stats.get("finding_stability", [])
+            if stability_data:
+                print(f"\n    {BOLD}Finding Stability:{RESET}")
+                for s in stability_data[:15]:
+                    stab = s["stability"]
+                    stab_color = GREEN if stab == "stable" else YELLOW if stab == "intermittent" else RED if stab == "rare" else CYAN
+                    fp_tag = f" {GREEN}[FP-clean]{RESET}" if s.get("fp_verified") else ""
+                    print(
+                        f"      {stab_color}{stab:<12}{RESET} "
+                        f"{s['severity']:<8} "
+                        f"seen {s['times_seen']}/{s['total_scans']} "
+                        f"(conf: {s['statistical_confidence']:.0%}){fp_tag} "
+                        f"{DIM}{s['title'][:50]}{RESET}"
+                    )
+
+            disappeared = stats.get("disappeared_findings", [])
+            if disappeared:
+                print(f"\n    {BOLD}Previously Seen (now absent):{RESET}")
+                for d in disappeared[:10]:
+                    print(f"      {DIM}[{d['severity']}] {d['title'][:60]}{RESET}")
+                    print(f"        {DIM}{d.get('note', '')}{RESET}")
 
     print()
 
@@ -1758,6 +1954,23 @@ def _run_direct_ip(targets, args):
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
                 print(f"{RED}[!] Error: {target} → {ip}: {e}{RESET}", file=sys.stderr)
                 reports.append({"target": target, "ip": ip, "error": str(e)})
+
+    # Persist bypass results for cross-session tracking
+    try:
+        from .modules.scan_persistence import ScanPersistence
+        db = ScanPersistence()
+        for r in reports:
+            if r.get("ip") and r.get("target"):
+                rdomain = dns_resolver._clean_domain(r["target"])
+                db.store_recon_ip(
+                    domain=rdomain,
+                    ip=r["ip"],
+                    source="direct-ip-test",
+                    bypass_confirmed=r.get("bypass_confirmed", False),
+                )
+        db.close()
+    except Exception:
+        pass
 
     # Print summary table if multiple IPs tested
     if not is_json and len(reports) > 1:

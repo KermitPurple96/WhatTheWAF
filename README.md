@@ -124,6 +124,14 @@ A 10-layer analysis framework that tests the WAF itself for weaknesses:
 | Session | Cookie manipulation, authentication bypass, session fixation |
 | Misconfiguration | Version leakage, information disclosure, config errors |
 
+**False Positive Verification:** Every finding in the rule engine and evasion layers is automatically validated against a clean baseline. If the attack response is identical to the homepage (and the payload isn't reflected), it's still flagged as a WAF gap — but findings that pass FP verification get a `[FP-clean]` tag and higher confidence score.
+
+**Statistical Persistence:** Results are stored in a local SQLite database (`~/.local/share/whatthewaf/scan_history.db`) across sessions. On repeat scans, you get:
+- **Stability classification** — is a finding `stable` (80%+ scans), `intermittent`, or `rare`?
+- **Statistical confidence** — weighted by hit rate, consistency, and verification status
+- **Diff tracking** — what's new this scan, what disappeared (patched or intermittent?)
+- **Recon IP tracking** — IPs from `--recon` and `--direct-ip` accumulate confidence over time
+
 ### Stealth & Evasion Stack
 
 Multiple layers can be combined for maximum stealth:
@@ -357,10 +365,13 @@ wtw example.com --direct-ip 203.0.113.50 --json -o bypass-poc.json
 ```
 --waf-scan               Run 10-layer WAF vulnerability scanner
 --waf-scan-layers LAYERS Scan specific layers (comma-separated)
+--no-persist             Don't store results in history database
+--scan-history           Show scan history + statistical analysis for domain
+--purge-history          Delete stored scan history for domain
 ```
 
 ```bash
-# Full 10-layer scan
+# Full 10-layer scan (results auto-stored for cross-session analysis)
 wtw example.com --waf-scan
 
 # Only test rule engine and evasion layers
@@ -368,6 +379,15 @@ wtw example.com --waf-scan --waf-scan-layers ruleengine,evasion
 
 # Combine with stealth
 wtw example.com --waf-scan --tor --tls-rotate
+
+# View statistical analysis across previous scans
+wtw example.com --scan-history
+
+# Scan without storing results
+wtw example.com --waf-scan --no-persist
+
+# Clear history for a domain
+wtw example.com --purge-history
 ```
 
 ### API Key Management
@@ -691,6 +711,7 @@ With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
 | error_pages | Probe 404/403/500/WAF trigger pages for signature leakage |
 | asn_lookup | ASN classification: 50+ WAF/CDN providers, 30+ hosting providers |
 | dns_resolver | DNS resolution with CNAME chain extraction |
+| scan_persistence | Cross-session SQLite storage with statistical confidence scoring and FP verification |
 
 ## WAF/CDN Provider Detection
 

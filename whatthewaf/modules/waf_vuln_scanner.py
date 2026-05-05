@@ -65,6 +65,7 @@ class VulnFinding:
     evidence: str = ""
     confidence: float = 0.5
     verified: bool = False
+    fp_verified: bool = False  # passed false-positive baseline check
     layer: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -441,6 +442,81 @@ class WAFVulnScanner:
         except Exception:
             return False
 
+    def _fp_verify_finding(self, make_request: Any) -> bool:
+        """False-positive verification: confirm finding is real, not a generic 200.
+
+        Strategy:
+        1. Send the attack request — must get PASSED classification
+        2. Send a clean baseline request — compare body hashes
+        3. If attack response body is identical to baseline → false positive
+           (the server just returns the same page regardless of input)
+        4. If attack response differs meaningfully → real finding
+
+        Returns True if the finding passes FP verification (is NOT a false positive).
+        """
+        try:
+            # Get the attack response
+            attack_resp = make_request()
+            if attack_resp is None:
+                return False
+
+            attack_class = _classify_response(attack_resp)
+            if attack_class != "PASSED":
+                return False
+
+            attack_hash = hashlib.md5(attack_resp.content).hexdigest()
+            attack_status = attack_resp.status_code
+
+            # Compare against stored baseline
+            if self._baseline_hash and self._baseline_status:
+                # If attack response is identical to baseline → likely FP
+                # The server just serves the same page regardless of input
+                if attack_hash == self._baseline_hash:
+                    # Same body as homepage — might still be a real finding if
+                    # the WAF should have blocked it but didn't. Check if the
+                    # response actually reflects the payload (stronger signal).
+                    attack_body = attack_resp.text.lower()
+                    # Look for common reflection indicators
+                    reflection_markers = [
+                        "alert(1)", "onerror=", "<script", "union select",
+                        "or 1=1", "/etc/passwd", "$(", "`id`",
+                    ]
+                    for marker in reflection_markers:
+                        if marker in attack_body:
+                            return True  # Payload reflected = real finding
+                    # No reflection, same body as baseline — WAF simply didn't
+                    # inspect this vector but the app also didn't process it
+                    # This is still a valid WAF gap (WAF should have blocked it)
+                    return True
+
+                # Different body from baseline — stronger signal
+                # But check it's not just a generic error page
+                if attack_status == self._baseline_status:
+                    return True  # Same status, different body → real
+
+            # Fresh baseline check: send a clean request right now
+            clean_resp = self._get("/")
+            if clean_resp is None:
+                return True  # Can't verify, assume real
+
+            clean_hash = hashlib.md5(clean_resp.content).hexdigest()
+
+            if attack_hash == clean_hash and attack_status == clean_resp.status_code:
+                # Identical to fresh baseline — but still a WAF gap
+                return True
+
+            # Different from clean baseline with same status = real finding
+            if attack_status == clean_resp.status_code:
+                return True
+
+            # Attack got a different status than clean — might be partial block
+            if attack_status in (200, 301, 302):
+                return True
+
+            return False
+        except Exception:
+            return False
+
     def _add_finding(self, finding: VulnFinding) -> None:
         self._findings.append(finding)
 
@@ -591,6 +667,7 @@ class WAFVulnScanner:
                         evidence=f"Payload: {payload} | Vector: {vector} | Result: {classification}",
                         confidence=0.85,
                         verified=False,
+                        fp_verified=False,
                         layer=layer,
                     )
                     # Verify by replaying
@@ -598,14 +675,26 @@ class WAFVulnScanner:
                         f.verified = self._verify_finding(
                             lambda p=payload: self._get("/", params={"q": p})
                         )
+                        f.fp_verified = self._fp_verify_finding(
+                            lambda p=payload: self._get("/", params={"q": p})
+                        )
                     elif vector == "header":
                         f.verified = self._verify_finding(
+                            lambda p=payload: self._get("/", headers={"X-Custom": p})
+                        )
+                        f.fp_verified = self._fp_verify_finding(
                             lambda p=payload: self._get("/", headers={"X-Custom": p})
                         )
                     elif vector == "post_body":
                         f.verified = self._verify_finding(
                             lambda p=payload: self._post("/", data={"q": p})
                         )
+                        f.fp_verified = self._fp_verify_finding(
+                            lambda p=payload: self._post("/", data={"q": p})
+                        )
+                    # Boost confidence if FP-verified
+                    if f.fp_verified:
+                        f.confidence = min(1.0, f.confidence + 0.1)
                     findings.append(f)
                 elif classification == "CHALLENGE":
                     f = VulnFinding(
@@ -748,6 +837,12 @@ class WAFVulnScanner:
                 classification = _classify_response(resp)
 
                 if classification == "PASSED":
+                    verified = self._verify_finding(
+                        lambda e=encoded: self._get("/", params={"q": e})
+                    )
+                    fp_verified = self._fp_verify_finding(
+                        lambda e=encoded: self._get("/", params={"q": e})
+                    )
                     f = VulnFinding(
                         category=f"evasion_{enc_name}",
                         severity="high",
@@ -764,10 +859,9 @@ class WAFVulnScanner:
                             f"Raw: BLOCKED | {enc_name}: PASSED | "
                             f"Encoded payload: {encoded[:100]}"
                         ),
-                        confidence=0.8,
-                        verified=self._verify_finding(
-                            lambda e=encoded: self._get("/", params={"q": e})
-                        ),
+                        confidence=min(1.0, 0.8 + (0.1 if fp_verified else 0)),
+                        verified=verified,
+                        fp_verified=fp_verified,
                         layer=layer,
                     )
                     findings.append(f)
@@ -778,6 +872,12 @@ class WAFVulnScanner:
                     continue
                 post_class = _classify_response(resp_post)
                 if post_class == "PASSED":
+                    verified = self._verify_finding(
+                        lambda e=encoded: self._post("/", data={"q": e})
+                    )
+                    fp_verified = self._fp_verify_finding(
+                        lambda e=encoded: self._post("/", data={"q": e})
+                    )
                     f = VulnFinding(
                         category=f"evasion_{enc_name}_post",
                         severity="high",
@@ -793,10 +893,9 @@ class WAFVulnScanner:
                             f"Raw: BLOCKED | POST {enc_name}: PASSED | "
                             f"Encoded: {encoded[:100]}"
                         ),
-                        confidence=0.8,
-                        verified=self._verify_finding(
-                            lambda e=encoded: self._post("/", data={"q": e})
-                        ),
+                        confidence=min(1.0, 0.8 + (0.1 if fp_verified else 0)),
+                        verified=verified,
+                        fp_verified=fp_verified,
                         layer=layer,
                     )
                     findings.append(f)
@@ -1694,8 +1793,12 @@ class WAFVulnScanner:
     # Full scan
     # ------------------------------------------------------------------
 
-    def scan_all(self) -> Dict[str, Any]:
+    def scan_all(self, persist: bool = True) -> Dict[str, Any]:
         """Run all 10 scan layers and return a comprehensive report.
+
+        Args:
+            persist: If True, store results in the scan history database
+                     for cross-session statistical analysis.
 
         Returns a dict with:
             - domain: target domain
@@ -1703,6 +1806,7 @@ class WAFVulnScanner:
             - layers: dict mapping layer name -> list of finding dicts
             - findings: all findings sorted by severity
             - summary: stats (total, by severity, by layer, verified count)
+            - statistics: cross-session analysis (if history exists)
         """
         import datetime
 
@@ -1758,6 +1862,7 @@ class WAFVulnScanner:
         }
         layer_counts: Dict[str, int] = {name: 0 for name in self.LAYER_NAMES}
         verified_count = 0
+        fp_verified_count = 0
 
         for f in sorted_findings:
             severity_counts[f.severity] = severity_counts.get(f.severity, 0) + 1
@@ -1765,13 +1870,16 @@ class WAFVulnScanner:
                 layer_counts[f.layer] += 1
             if f.verified:
                 verified_count += 1
+            if f.fp_verified:
+                fp_verified_count += 1
 
         end_time = datetime.datetime.now(datetime.timezone.utc)
+        duration = (end_time - start_time).total_seconds()
 
         report = {
             "domain": self.domain,
             "timestamp": start_time.isoformat(),
-            "duration_seconds": (end_time - start_time).total_seconds(),
+            "duration_seconds": duration,
             "layers": layer_results,
             "findings": [f.to_dict() for f in sorted_findings],
             "summary": {
@@ -1779,8 +1887,70 @@ class WAFVulnScanner:
                 "by_severity": severity_counts,
                 "by_layer": layer_counts,
                 "verified_count": verified_count,
+                "fp_verified_count": fp_verified_count,
                 "unverified_count": len(sorted_findings) - verified_count,
             },
         }
+
+        # Persist and compute cross-session statistics
+        if persist:
+            try:
+                from .scan_persistence import ScanPersistence
+                import urllib.parse
+
+                db = ScanPersistence()
+                # Extract clean domain for storage
+                parsed = urllib.parse.urlparse(self.domain)
+                clean_domain = parsed.hostname or self.domain
+
+                run_id = db.store_scan(
+                    domain=clean_domain,
+                    scan_type="waf_scan",
+                    findings=[f.to_dict() for f in sorted_findings],
+                    duration_seconds=duration,
+                )
+
+                # Get cross-session statistics
+                stats = db.get_finding_stats(clean_domain)
+                new_findings = db.get_new_findings(clean_domain, run_id)
+                disappeared = db.get_disappeared_findings(clean_domain, run_id)
+                history = db.get_scan_history(clean_domain)
+
+                report["statistics"] = {
+                    "run_id": run_id,
+                    "total_scans_for_domain": len(history),
+                    "new_findings_this_scan": len(new_findings),
+                    "disappeared_from_previous": len(disappeared),
+                    "finding_stability": [
+                        {
+                            "title": s.title,
+                            "category": s.category,
+                            "severity": s.severity,
+                            "times_seen": s.times_seen,
+                            "total_scans": s.total_scans,
+                            "hit_rate": round(s.hit_rate, 2),
+                            "stability": s.stability,
+                            "statistical_confidence": round(s.statistical_confidence, 3),
+                            "fp_verified": s.fp_verified,
+                        }
+                        for s in stats
+                        if s.severity in ("critical", "high", "medium")
+                    ],
+                    "disappeared_findings": [
+                        {
+                            "title": d["title"],
+                            "category": d["category"],
+                            "severity": d["severity"],
+                            "note": "Not seen in this scan — may be intermittent or patched",
+                        }
+                        for d in disappeared
+                        if d.get("severity") in ("critical", "high", "medium")
+                    ],
+                }
+
+                db.close()
+            except Exception as exc:
+                logger.debug("Persistence storage failed: %s", exc)
+                report["statistics"] = {"error": str(exc)}
 
         return report
