@@ -142,7 +142,10 @@ Multiple layers can be combined for maximum stealth:
 | TCP | `tcp_fingerprint` / `tcp_options` | Change TTL, window size, SACK to look like Windows/macOS |
 | TLS | `tls_rotator` | Rotate JA3/JA4 fingerprint per request (Chrome, Firefox, Safari, Edge profiles) |
 | HTTP/2 | `h2_fingerprint` / `http2_fingerprint` | Rotate SETTINGS frames, header order, priority weights |
+| HTTP/3 | `http3_probe` / `socks5_udp` | QUIC probing, protocol-level bypass detection, SOCKS5 UDP relay |
 | HTTP | `proxy_mode` | Rewrite headers, strip tool signatures, add browser-like patterns |
+| Headers | `header_order` | Browser-accurate header ordering (Chrome, Firefox, Safari, Edge) |
+| DNS | `dns_encrypted` | DNS-over-TLS/DoH to prevent DNS leakage and bypass DNS-level blocks |
 | Source Port | `source_port` | Use trusted ports (80, 443, 53) or browser-range ports to evade tracking |
 | JS Challenges | `headless_browser` | Solve Cloudflare Turnstile, DataDome, PerimeterX with stealth Playwright |
 | MITM | `mitm_proxy` | Full HTTPS interception with dynamic per-host certificate generation |
@@ -154,6 +157,18 @@ Multiple layers can be combined for maximum stealth:
 sudo wtw --tcp-profile windows                                          # Terminal 1
 wtw --proxy-mode --proton --tls-rotate --h2-rotate --random-delay 2     # Terminal 2
 wtw target.com --proxy http://127.0.0.1:8888 --evasion                  # Terminal 3
+
+# Protocol-level analysis
+wtw target.com --proto-probe                    # Test H1 vs H2 vs H3
+wtw target.com --h3                             # Quick HTTP/3 QUIC probe
+
+# Encrypted DNS (prevent DNS leakage)
+wtw target.com --dot google                     # DNS-over-TLS via Google
+wtw target.com --doh cloudflare                 # DNS-over-HTTPS via Cloudflare
+
+# Browser-accurate header ordering
+wtw target.com --header-profile chrome --evasion
+wtw target.com --header-profile firefox --waf-scan
 ```
 
 ## Flags
@@ -422,6 +437,11 @@ wtw example.com --purge-history
 --source-port PROFILE    Manipulate TCP source port (trusted/browser_linux/browser_windows/scanner_evasion/rotating)
 --tls-rotate             Rotate TLS fingerprint per request
 --h2-rotate              Rotate HTTP/2 SETTINGS fingerprint per request
+--h3                     Probe HTTP/3 (QUIC) support and compare with HTTP/2
+--proto-probe            Test H1 vs H2 vs H3 and report WAF differences per protocol
+--header-profile BROWSER Header ordering profile (chrome/firefox/safari/edge)
+--dot [PROVIDER]         DNS-over-TLS (cloudflare/google/quad9/adguard)
+--doh [PROVIDER]         DNS-over-HTTPS (cloudflare/google/quad9/adguard)
 --tcp-options PROFILE    Set TCP SYN options (chrome/firefox/safari/edge/windows10/linux/random)
 --auto-retry             Auto-retry with different techniques when WAF blocks
 --proxy-pool FILE        File with proxy URLs for IP rotation pool
@@ -711,6 +731,11 @@ With the GUI you cannot use `--proton-rotate` (rotation requires the CLI).
 | error_pages | Probe 404/403/500/WAF trigger pages for signature leakage |
 | asn_lookup | ASN classification: 50+ WAF/CDN providers, 30+ hosting providers |
 | dns_resolver | DNS resolution with CNAME chain extraction |
+| dns_encrypted | DNS-over-TLS and DNS-over-HTTPS (Cloudflare, Google, Quad9, AdGuard) |
+| header_order | Browser-accurate header ordering profiles (Chrome, Firefox, Safari, Edge) |
+| http3_probe | HTTP/3 QUIC probing, protocol comparison, and WAF bypass detection |
+| socks5_udp | SOCKS5 UDP ASSOCIATE relay for routing QUIC through proxies |
+| proto_probe | Multi-protocol probing (H1/H2/H3) with WAF behavior diff analysis |
 | scan_persistence | Cross-session SQLite storage with statistical confidence scoring and FP verification |
 
 ## WAF/CDN Provider Detection

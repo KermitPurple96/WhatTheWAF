@@ -13,9 +13,19 @@ DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 def fetch_response(url, timeout=10, user_agent=None, proxy=None):
     try:
+        # Use browser-ordered headers if a profile is active
+        try:
+            from .modules.header_order import get_active_profile, build_headers
+            if get_active_profile():
+                req_headers = build_headers(user_agent=user_agent or DEFAULT_UA)
+            else:
+                req_headers = {"User-Agent": user_agent or DEFAULT_UA}
+        except Exception:
+            req_headers = {"User-Agent": user_agent or DEFAULT_UA}
+
         client_kwargs = {
             "timeout": timeout, "follow_redirects": True, "verify": False,
-            "headers": {"User-Agent": user_agent or DEFAULT_UA},
+            "headers": req_headers,
         }
         if proxy:
             client_kwargs["proxy"] = proxy

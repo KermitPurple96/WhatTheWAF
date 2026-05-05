@@ -4,9 +4,19 @@ import socket
 import dns.resolver
 
 
+def _get_resolver():
+    """Get the active resolver (encrypted if configured via --dot/--doh)."""
+    try:
+        from .dns_encrypted import get_resolver
+        return get_resolver()
+    except Exception:
+        return dns.resolver.Resolver()
+
+
 def resolve_domain(domain):
     """Resolve a domain to its full DNS info."""
     domain = _clean_domain(domain)
+    resolver = _get_resolver()
     info = {
         "domain": domain,
         "a_records": [],
@@ -18,35 +28,35 @@ def resolve_domain(domain):
 
     # A records
     try:
-        answers = dns.resolver.resolve(domain, "A")
+        answers = resolver.resolve(domain, "A")
         info["a_records"] = [r.to_text() for r in answers]
     except Exception:
         pass
 
     # CNAME chain
     try:
-        answers = dns.resolver.resolve(domain, "CNAME")
+        answers = resolver.resolve(domain, "CNAME")
         info["cnames"] = [r.to_text().rstrip(".") for r in answers]
     except Exception:
         pass
 
     # NS records
     try:
-        answers = dns.resolver.resolve(domain, "NS")
+        answers = resolver.resolve(domain, "NS")
         info["ns_records"] = [r.to_text().rstrip(".") for r in answers]
     except Exception:
         pass
 
     # MX records
     try:
-        answers = dns.resolver.resolve(domain, "MX")
+        answers = resolver.resolve(domain, "MX")
         info["mx_records"] = [r.exchange.to_text().rstrip(".") for r in answers]
     except Exception:
         pass
 
     # TXT records
     try:
-        answers = dns.resolver.resolve(domain, "TXT")
+        answers = resolver.resolve(domain, "TXT")
         info["txt_records"] = [r.to_text().strip('"') for r in answers]
     except Exception:
         pass
@@ -57,8 +67,9 @@ def resolve_domain(domain):
 def resolve_ip(domain):
     """Simple A record resolution, returns list of IPs."""
     domain = _clean_domain(domain)
+    resolver = _get_resolver()
     try:
-        answers = dns.resolver.resolve(domain, "A")
+        answers = resolver.resolve(domain, "A")
         return [r.to_text() for r in answers]
     except Exception:
         # Fallback to socket

@@ -119,6 +119,17 @@ def main():
                         help="Rotate TLS fingerprint per request (requires tls-client)")
     parser.add_argument("--h2-rotate", action="store_true",
                         help="Rotate HTTP/2 SETTINGS fingerprint per request")
+    parser.add_argument("--h3", action="store_true",
+                        help="Probe target for HTTP/3 (QUIC) support and compare with HTTP/2")
+    parser.add_argument("--proto-probe", action="store_true",
+                        help="Test HTTP/1.1 vs HTTP/2 vs HTTP/3 and report WAF differences per protocol")
+    parser.add_argument("--dot", nargs="?", const="cloudflare", default=None, metavar="PROVIDER",
+                        help="Use DNS-over-TLS (providers: cloudflare, google, quad9, adguard)")
+    parser.add_argument("--doh", nargs="?", const="cloudflare", default=None, metavar="PROVIDER",
+                        help="Use DNS-over-HTTPS (providers: cloudflare, google, quad9, adguard)")
+    parser.add_argument("--header-profile", metavar="BROWSER",
+                        choices=["chrome", "firefox", "safari", "edge", "none"],
+                        help="Use browser-accurate header ordering (chrome, firefox, safari, edge)")
     parser.add_argument("--tcp-options", metavar="PROFILE",
                         choices=["chrome", "firefox", "safari", "edge", "windows10", "linux", "random"],
                         help="Set TCP SYN options to match browser profile (requires scapy + root)")
@@ -170,6 +181,23 @@ def main():
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    # Activate encrypted DNS if requested
+    if args.dot:
+        from .modules.dns_encrypted import configure_dot
+        configure_dot(args.dot)
+        if not args.quiet and not args.no_banner:
+            print(f"  {DIM}[dns] DNS-over-TLS via {args.dot}{RESET}", file=sys.stderr)
+    elif args.doh:
+        from .modules.dns_encrypted import configure_doh
+        configure_doh(args.doh)
+        if not args.quiet and not args.no_banner:
+            print(f"  {DIM}[dns] DNS-over-HTTPS via {args.doh}{RESET}", file=sys.stderr)
+
+    # Activate header order profile if requested
+    if args.header_profile:
+        from .modules.header_order import set_profile
+        set_profile(args.header_profile)
 
     if not args.quiet and not args.no_banner:
         print(_load_banner(), file=sys.stderr)
@@ -242,7 +270,11 @@ def main():
         _run_purge_history(targets, args)
         return
 
-    if args.waf_scan:
+    if args.proto_probe:
+        _run_proto_probe(targets, args)
+    elif args.h3:
+        _run_h3_probe(targets, args)
+    elif args.waf_scan:
         _run_waf_scan(targets, args)
     elif args.cf_inject:
         _run_cf_inject(targets, args)
@@ -1301,6 +1333,118 @@ def _run_api_init():
         print(f"{YELLOW}[!] Config file already exists: {existing}{RESET}")
         print(f"  {DIM}Edit it directly to update your keys.{RESET}")
     print()
+
+
+def _run_h3_probe(targets, args):
+    """Probe HTTP/3 (QUIC) support and compare with HTTP/2."""
+    from .modules.http3_probe import check_alt_svc, probe_h3, compare_h2_vs_h3
+    from .modules import dns_resolver
+
+    is_json = args.json
+    all_reports = []
+
+    for target in targets:
+        domain = dns_resolver._clean_domain(target)
+        print(f"{CYAN}[*] HTTP/3 probe: {domain}{RESET}", file=sys.stderr)
+
+        report = compare_h2_vs_h3(domain, path=args.path if hasattr(args, 'path') else "/", timeout=args.timeout)
+        all_reports.append(report)
+
+        if not is_json:
+            print(f"\n{BOLD}{CYAN}  HTTP/3 vs HTTP/2: {domain}{RESET}")
+            print(f"  {'─' * 50}")
+
+            h2 = report.get("h2", {})
+            h3 = report.get("h3", {})
+
+            if h2.get("status"):
+                proto = h2.get("protocol", "?")
+                print(f"  {BOLD}HTTP/2:{RESET}  [{h2['status']}] server={h2.get('server', '?')} hash={h2.get('body_hash', '?')} ({h2.get('time_ms', '?')}ms) [{proto}]")
+            elif h2.get("error"):
+                print(f"  {RED}HTTP/2:  error: {h2['error']}{RESET}")
+
+            if h3.get("h3_supported"):
+                print(f"  {GREEN}{BOLD}HTTP/3:{RESET}  [{h3.get('status_code', '?')}] server={h3.get('server_name', '?')} hash={h3.get('body_hash', '?')} ({h3.get('handshake_time_ms', '?')}ms) [QUIC]")
+            elif h3.get("error"):
+                print(f"  {YELLOW}HTTP/3:  not supported ({h3.get('error', '?')}){RESET}")
+            else:
+                print(f"  {YELLOW}HTTP/3:  not supported{RESET}")
+
+            diffs = report.get("differences", [])
+            if diffs:
+                print(f"\n  {BOLD}Differences:{RESET}")
+                for d in diffs:
+                    color = RED if "BYPASS" in d else YELLOW
+                    print(f"    {color}{d}{RESET}")
+
+            if report.get("h3_bypass_potential"):
+                print(f"\n  {RED}{BOLD}! HTTP/3 BYPASS POTENTIAL — WAF rules may not apply to QUIC traffic{RESET}")
+
+            # Alt-Svc
+            alt_svc = h2.get("alt_svc", "")
+            if alt_svc:
+                print(f"\n  {DIM}Alt-Svc: {alt_svc}{RESET}")
+            print()
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _run_proto_probe(targets, args):
+    """Full protocol probe — test H1 vs H2 vs H3 and report WAF differences."""
+    from .modules.proto_probe import probe_all_protocols
+    from .modules import dns_resolver
+
+    is_json = args.json
+    all_reports = []
+
+    for target in targets:
+        domain = dns_resolver._clean_domain(target)
+        print(f"{CYAN}[*] Protocol probe: {domain}{RESET}", file=sys.stderr)
+
+        report = probe_all_protocols(domain, timeout=args.timeout, user_agent=args.user_agent or "")
+        all_reports.append(report)
+
+        if not is_json:
+            print(f"\n{BOLD}{CYAN}  Protocol Probe: {domain}{RESET}")
+            print(f"  {'─' * 60}")
+
+            protos = report.get("protocols", {})
+            for name, label in [("h1", "HTTP/1.1"), ("h2", "HTTP/2"), ("h3", "HTTP/3")]:
+                p = protos.get(name, {})
+                if p.get("supported"):
+                    print(f"  {GREEN}✓{RESET} {label:<10} [{p.get('status', '?')}] server={p.get('server', '?'):<20} hash={p.get('body_hash', '?')} ({p.get('time_ms', '?')}ms)")
+                elif p.get("error"):
+                    print(f"  {RED}✗{RESET} {label:<10} {DIM}{p.get('error', 'unsupported')}{RESET}")
+                else:
+                    print(f"  {YELLOW}·{RESET} {label:<10} {DIM}not supported{RESET}")
+
+            diffs = report.get("differences", [])
+            if diffs:
+                print(f"\n  {BOLD}Differences:{RESET}")
+                for d in diffs:
+                    color = RED if "BYPASS" in d else YELLOW
+                    print(f"    {color}{d}{RESET}")
+
+            recs = report.get("recommendations", [])
+            if recs:
+                print(f"\n  {BOLD}Recommendations:{RESET}")
+                for r in recs:
+                    print(f"    {CYAN}{r}{RESET}")
+
+            timing = report.get("timing", {})
+            if timing:
+                fastest = report.get("fastest_protocol", "?")
+                print(f"\n  {DIM}Timing: {timing} (fastest: {fastest}){RESET}")
+
+            print()
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
 
 
 def _run_scan_history(targets, args):

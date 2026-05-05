@@ -50,6 +50,7 @@ setup(
             "stem",
             "urwid",
             "h2>=4.0.0",
+            "aioquic>=1.0.0",
         ],
     },
     entry_points={
