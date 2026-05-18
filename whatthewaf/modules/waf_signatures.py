@@ -39,6 +39,14 @@ SIGNATURES = [
         "cookies": [r"aws-waf-token"],
         "body": [r"request.blocked.*aws", r"x.amz.id.\d+", r"x.amz.request.id"],
     },
+    # --- AWS Elastic Load Balancer ---
+    {
+        "name": "AWS ELB",
+        "category": "WAF",
+        "headers": [("server", "awselb"), ("x-amzn-requestid", None), ("x-amz-apigw-id", None)],
+        "cookies": [r"AWSELB", r"AWSELBAPP", r"AWSALBTG", r"AWSALBTGSTICKY"],
+        "body": [],
+    },
     # --- Sucuri ---
     {
         "name": "Sucuri",

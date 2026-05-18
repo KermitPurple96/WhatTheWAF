@@ -2485,6 +2485,30 @@ def _line(text):
     print(f"    {text}")
 
 
+def _waf_active_analysis(report):
+    """Analyze error page probes to determine if WAF is actively blocking attacks."""
+    ep = report.get("error_pages", {})
+    ep_probes = ep.get("probes", [])
+    blocked = []
+    passed = []
+    waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
+
+    for p in ep_probes:
+        if p.get("error") or p.get("trigger") != "waf":
+            continue
+        status = p.get("status", 0)
+        has_waf_hit = bool(p.get("waf_hits"))
+        is_blocked = status in waf_trigger_statuses or has_waf_hit
+        entry = {"path": p["path"], "description": p["description"],
+                 "status": status, "waf_hits": p.get("waf_hits", [])}
+        if is_blocked:
+            blocked.append(entry)
+        else:
+            passed.append(entry)
+
+    return blocked, passed
+
+
 def _print_report(report):
     target = report['target']
     W = max(len(target) + 16, 60)
@@ -2493,6 +2517,54 @@ def _print_report(report):
     print(f"{BOLD}{CYAN}║  WAF Recon: {target}{' ' * max(title_pad, 1)} ║{RESET}")
     print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
     print(f"  {BOLD}Summary:{RESET} {report['summary']}")
+
+    # ── WAF STATUS (the main verdict) ──
+    waf_detections = report.get("waf", [])
+    waf_names = [d["name"] for d in waf_detections if d["category"] in ("WAF", "CDN/WAF")]
+    cdn_names = [d["name"] for d in waf_detections if d["category"] in ("CDN", "CDN/WAF")]
+    for rec in report.get("ips", []):
+        if rec.get("classification") == "CDN" and rec.get("provider"):
+            prov = rec["provider"].split(" - ")[0].strip()
+            if prov not in cdn_names:
+                cdn_names.append(prov)
+
+    blocked, passed = _waf_active_analysis(report)
+
+    _section("WAF Status", CYAN)
+    if waf_names:
+        unique_waf = list(dict.fromkeys(waf_names))
+        _line(f"{RED}[+] WAF Detected:{RESET} {BOLD}{', '.join(unique_waf)}{RESET}")
+        if blocked:
+            _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{len(blocked)+len(passed)} attack payloads")
+            for b in blocked:
+                waf_str = f" ({', '.join(b['waf_hits'])})" if b["waf_hits"] else ""
+                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}{waf_str}")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+        elif passed:
+            _line(f"{YELLOW}[!] WAF Active:{RESET}   {YELLOW}NO{RESET} — detected but {BOLD}not blocking{RESET} attack payloads")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+        else:
+            _line(f"{DIM}[?] WAF Active:   Unknown (no probe results){RESET}")
+    else:
+        if blocked:
+            _line(f"{YELLOW}[+] WAF Detected:{RESET} {BOLD}Unknown WAF{RESET} (no signature match)")
+            _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{len(blocked)+len(passed)} attack payloads")
+            for b in blocked:
+                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+        else:
+            _line(f"{GREEN}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
+            if passed:
+                _line(f"{GREEN}[-] WAF Active:{RESET}   {BOLD}No{RESET} — all {len(passed)} attack payloads passed through")
+            else:
+                _line(f"{GREEN}[-] WAF Active:{RESET}   {BOLD}No{RESET}")
+
+    if cdn_names:
+        unique_cdn = list(dict.fromkeys(cdn_names))
+        _line(f"{YELLOW}[*] CDN:{RESET}          {', '.join(unique_cdn)}")
 
     # HTTP
     http = report.get("http", {})

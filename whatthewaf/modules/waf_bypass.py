@@ -11,6 +11,7 @@ Techniques:
 
 import hashlib
 import re
+import concurrent.futures
 import httpx
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -77,10 +78,14 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
     if not baseline or baseline.get("error"):
         return report
 
-    # Step 2: Direct IP access with Host header
-    for ip in origin_ips:
+    # Step 2: Direct IP access with Host header (parallelized, one thread per IP)
+    def _test_ip_all(ip):
+        """Test one IP: main port + alt ports + HTTP downgrade."""
+        results = []
+        findings = []
+
         ip_result = _test_direct_ip(ip, domain, timeout, ua, proxy)
-        report["ip_tests"].append(ip_result)
+        results.append(ip_result)
 
         if ip_result.get("accessible") and not ip_result.get("blocked"):
             finding = {
@@ -95,16 +100,15 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
             if ip_result.get("waf_absent"):
                 finding["detail"] += " — WAF signatures absent from direct response"
                 finding["severity"] = "critical"
-            report["findings"].append(finding)
+            findings.append(finding)
 
-        # Test alternative ports on origin
         for port in [8080, 8443]:
             alt_result = _test_direct_ip(ip, domain, timeout, ua, proxy, port=port)
             if alt_result.get("accessible"):
                 alt_result["port"] = port
-                report["ip_tests"].append(alt_result)
+                results.append(alt_result)
                 scheme = "https" if port in (8443, 443) else "http"
-                report["findings"].append({
+                findings.append({
                     "type": "alt_port",
                     "ip": ip,
                     "port": port,
@@ -114,12 +118,11 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
                     "curl_resolve": _build_curl_resolve(domain, ip, port),
                 })
 
-        # Test HTTP (no TLS) on origin
         http_result = _test_direct_ip(ip, domain, timeout, ua, proxy, scheme="http")
         if http_result.get("accessible"):
             http_result["scheme"] = "http"
-            report["ip_tests"].append(http_result)
-            report["findings"].append({
+            results.append(http_result)
+            findings.append({
                 "type": "http_downgrade",
                 "ip": ip,
                 "detail": f"Origin accessible via plain HTTP at {ip}",
@@ -127,6 +130,18 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
                 "curl": _build_curl_direct_ip(ip, domain, 80, "http"),
                 "curl_resolve": _build_curl_resolve(domain, ip, 80, scheme="http"),
             })
+
+        return results, findings
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_test_ip_all, ip): ip for ip in origin_ips}
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                results, findings = fut.result()
+                report["ip_tests"].extend(results)
+                report["findings"].extend(findings)
+            except Exception:
+                pass
 
     # Step 3: Header manipulation on the WAF-fronted domain
     for hdr_set in SPOOF_HEADERS_SETS:
