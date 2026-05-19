@@ -94,50 +94,109 @@ Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon h
 
 Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Use before and after applying stealth flags to verify your changes work.
 
-### Stealth Usage
+### Stealth Setup (full walkthrough)
 
-WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP/2, HTTP headers, DNS. Each stealth flag addresses a different layer. Check your fingerprint, apply layers, verify:
+WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP/2, HTTP headers, DNS. To be invisible you need to cover all of them. Here's the full setup for a pentest engagement using Burp Suite.
+
+**Step 1 — Check your current fingerprint:**
 
 ```bash
-# 1. See what you look like
 wtw --whoami
-
-# 2. Apply stealth layers to any scan
-wtw example.com --evasion --proton                      # Route through VPN
-wtw example.com --evasion --tls-rotate                  # Rotate TLS/JA3 fingerprint per request
-wtw example.com --evasion --header-profile chrome       # Browser-accurate header ordering
-wtw example.com --evasion --dot cloudflare              # Encrypted DNS (prevent DNS leaks)
-wtw example.com --waf-scan --proton --auto-retry        # Deep audit with VPN + auto-retry
-
-# 3. Full stealth (combine everything)
-wtw example.com --proton --tls-rotate --h2-rotate --header-profile chrome --doh cloudflare
-
-# 4. Verify your new fingerprint
-wtw --whoami
+# IP: 83.48.x.x | ISP: Telefonica | TTL: 64 → Linux | UA: python-httpx
+# Everything screams "automated tool from Spain"
 ```
 
-**TCP fingerprinting** — WAFs use p0f to detect your OS from TCP parameters (TTL, window size, SACK). If your User-Agent says Chrome/Windows but your TTL is 64 (Linux), you're flagged. Fix this:
+**Step 2 — Connect ProtonVPN (change IP + country):**
+
+```bash
+protonvpn connect --cc NL              # Connect to Netherlands
+wtw --proton-check                     # Verify SOCKS proxy is up
+```
+
+**Step 3 — TCP fingerprint (look like Windows, not Linux):**
 
 ```bash
 sudo wtw --tcp-profile windows         # TTL=128, Windows TCP stack
-wtw --whoami                           # Verify: TTL: 128 → Windows
-# ... run your scans ...
-sudo wtw --tcp-revert                  # Restore Linux defaults
 ```
 
-**Stealth proxy** — intercepts your traffic and modifies it to look like a browser. Use with Burp, Firefox, or any tool:
+**Step 4 — Start stealth proxy (covers TLS, HTTP/2, headers, timing):**
 
 ```bash
-# Terminal 1: start stealth proxy with TLS rotation
-wtw --proxy-mode --tls-rotate --h2-rotate --random-delay 2
-
-# Terminal 2: route scans through it
-wtw example.com --proxy http://127.0.0.1:8888 --evasion
-
-# Or configure Burp/Firefox to use HTTP proxy at 127.0.0.1:8888
+wtw --proxy-mode \
+    --proton \
+    --tls-rotate \
+    --h2-rotate \
+    --header-profile chrome \
+    --random-delay 1 \
+    --listen-port 8888
 ```
 
-`--mitm` is similar but with full HTTPS interception (dynamic per-host certs) for inspecting encrypted traffic.
+This proxy intercepts all outgoing traffic and modifies it to look like a real Chrome browser: rotates JA3/JA4 TLS fingerprint, HTTP/2 SETTINGS frames, header ordering, and adds random delays between requests. Traffic exits through ProtonVPN.
+
+**Step 5 — Configure Burp Suite to chain through the stealth proxy:**
+
+In Burp: `Settings → Network → Connections → Upstream Proxy Servers → Add`:
+- Destination host: `*`
+- Proxy host: `127.0.0.1`
+- Proxy port: `8888`
+
+The traffic flow:
+
+```
+Browser  →  Burp (8080)  →  wtw proxy (8888)  →  ProtonVPN  →  Internet
+             you see &         stealth               different
+             modify here       modifications          IP/country
+```
+
+**Step 6 — Verify your new fingerprint:**
+
+```bash
+wtw --whoami
+# IP: 185.x.x.x | ISP: M247 (NL) | TTL: 128 → Windows | Detected as: VPN
+```
+
+**Step 7 — Run your scans through the chain:**
+
+```bash
+# From wtw directly (through stealth proxy)
+wtw target.com --proxy http://127.0.0.1:8888 --evasion
+wtw target.com --proxy http://127.0.0.1:8888 --waf-scan
+
+# Or use Burp's browser — all traffic goes through the stealth chain automatically
+```
+
+**Step 8 — If blocked, rotate IP without rebuilding the chain:**
+
+```bash
+wtw --proton-rotate                    # New VPN server, new IP
+wtw --whoami                           # Verify new IP
+```
+
+**Step 9 — Clean up when done:**
+
+```bash
+sudo wtw --tcp-revert                  # Restore Linux TCP defaults
+protonvpn disconnect                   # Disconnect VPN
+# Ctrl+C the stealth proxy
+```
+
+**Layer summary:**
+
+| Layer | What changes | Flag |
+|-------|-------------|------|
+| IP | Different IP/country | `--proton` |
+| TCP | TTL=128, Windows TCP stack | `sudo --tcp-profile windows` |
+| DNS | Encrypted, no ISP snooping | `--doh cloudflare` |
+| TLS | Chrome JA3/JA4, rotates per request | `--tls-rotate` |
+| HTTP/2 | Chrome SETTINGS frames | `--h2-rotate` |
+| HTTP | Chrome header order, real UA | `--header-profile chrome` |
+| Timing | Random delays between requests | `--random-delay 1` |
+
+Without Burp, the stealth flags work the same — just combine them with any scan:
+
+```bash
+wtw target.com --proton --tls-rotate --h2-rotate --header-profile chrome --doh cloudflare --evasion
+```
 
 ## Flags
 
