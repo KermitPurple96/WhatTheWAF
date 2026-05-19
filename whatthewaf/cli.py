@@ -6,7 +6,19 @@ import sys
 import os
 
 from . import __version__
+from .constants import CDN_WAF_KEYWORDS
 from .scanner import origins_scan, full_scan, full_scan_batch, direct_ip_scan
+
+
+def _extract_domain(target):
+    """Extract clean domain from target (URL or domain string)."""
+    return target.replace("https://", "").replace("http://", "").split("/")[0]
+
+
+def _clear_status():
+    """Clear the status line on stderr."""
+    sys.stderr.write("\r\033[K")
+    sys.stderr.flush()
 
 RED = "\033[31m"; GREEN = "\033[32m"; YELLOW = "\033[33m"; BLUE = "\033[34m"
 CYAN = "\033[36m"; MAGENTA = "\033[35m"; BOLD = "\033[1m"; DIM = "\033[2m"; RESET = "\033[0m"
@@ -1032,7 +1044,7 @@ def _run_recon(targets, args):
         else:
             source_status["dnstrails"] = "no key"
 
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         # === CORRELATION: ASN classify all collected IPs ===
         all_ips = list(ip_intel.keys())
@@ -1053,14 +1065,10 @@ def _run_recon(targets, args):
 
         # === SSL CERT VALIDATION of non-CDN candidates ===
         # Connect to each candidate IP:443 and check if cert matches target domain
-        cdn_waf_keywords = {
-            "cloudflare", "akamai", "fastly", "cloudfront", "incapsula",
-            "imperva", "sucuri", "ddos-guard", "stackpath",
-        }
         candidates_to_verify = [
             ip for ip, intel in ip_intel.items()
             if intel.get("classification") != "CDN"
-            or not any(k in intel.get("provider", "").lower() for k in cdn_waf_keywords)
+            or not any(k in intel.get("provider", "").lower() for k in CDN_WAF_KEYWORDS)
         ][:15]  # cap at 15 to avoid slowness
 
         if candidates_to_verify:
@@ -1087,7 +1095,7 @@ def _run_recon(targets, args):
                             ip_intel[ip]["extra"]["cert_cn"] = cn
                             ip_intel[ip]["extra"]["cert_match"] = True
                             ip_intel[ip]["source_count"] = len(ip_intel[ip]["sources"])
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
 
         # Sort: most sources first, then non-CDN first, cert-verified first
         ranked = sorted(ip_intel.items(), key=lambda x: (
@@ -1827,7 +1835,7 @@ def _run_scan_history(targets, args):
 
     all_results = []
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
 
         history = db.get_scan_history(domain)
         finding_stats = db.get_finding_stats(domain)
@@ -1956,12 +1964,12 @@ def _run_tls_audit(targets, args):
     all_reports = []
 
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
         print(f"{CYAN}[*] TLS/SSL audit: {domain}{RESET}", file=sys.stderr)
 
         result = tls_fingerprint.analyze_tls_fingerprint(
             domain, timeout=args.timeout, on_status=status_cb)
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
         all_reports.append({"target": domain, "tls": result})
 
         if not is_json:
@@ -2117,7 +2125,7 @@ def _run_trace(targets, args):
     ip_mode = getattr(args, "ip", None)  # auto, history, or comma-separated IPs
 
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
         print(f"{CYAN}[*] Tracing infrastructure: {domain}{RESET}", file=sys.stderr)
 
         # Phase 1: full scan for signals
@@ -2125,19 +2133,19 @@ def _run_trace(targets, args):
                            proxy=args.proxy, on_status=status_cb,
                            only_modules=modules, check_evasion=args.evasion,
                            check_tls=False, scan_subs=False, check_cert=False)
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         # Phase 2: build infra chain
         status_cb("trace", "Analyzing infrastructure chain")
         sys.stderr.flush()
         chain = infra_trace.trace_infra(report)
         report["infra_chain"] = chain
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         # Phase 3: traceroute to domain (via CDN path)
         traceroute = infra_trace.run_traceroute(domain, on_status=status_cb)
         report["traceroute"] = traceroute
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         # Phase 4: resolve direct IPs and traceroute to them
         direct_ips = _resolve_trace_ips(ip_mode, domain, report, status_cb)
@@ -2148,7 +2156,7 @@ def _run_trace(targets, args):
                 sys.stderr.flush()
                 tr_direct = infra_trace.run_traceroute(ip, on_status=status_cb)
                 report["traceroute_direct"][ip] = tr_direct
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
 
         # Phase 5: subdomain takeover check
         # Feed subdomains from scan history + recon into the takeover scanner
@@ -2174,7 +2182,7 @@ def _run_trace(targets, args):
             domain, extra_subdomains=extra_subs,
             timeout=min(args.timeout, 5), on_status=status_cb)
         report["takeover"] = takeover
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         # Phase 6: cache poisoning test
         from .modules.deep_scan import test_cache_poisoning
@@ -2182,7 +2190,7 @@ def _run_trace(targets, args):
         status_cb("trace", "Cache poisoning tests")
         sys.stderr.flush()
         report["cache_poisoning"] = test_cache_poisoning(http_url, timeout=min(args.timeout, 5))
-        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        _clear_status()
 
         all_reports.append({"target": domain, "report": report})
 
@@ -2206,8 +2214,7 @@ def _resolve_trace_ips(ip_mode, domain, report, status_cb):
         ip_stats = db.get_ip_stats(domain)
         db.close()
         # Skip CDN edges
-        cdn_kw = {"cloudflare", "akamai", "fastly", "cloudfront", "incapsula",
-                   "imperva", "sucuri", "ddos-guard", "stackpath"}
+        cdn_kw = CDN_WAF_KEYWORDS
         ips = [s.ip for s in ip_stats
                if not any(k in (s.provider or "").lower() for k in cdn_kw)]
         return ips[:5]
@@ -2444,7 +2451,7 @@ def _run_purge_history(targets, args):
 
     db = ScanPersistence()
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
         count = db.purge_domain(domain)
         print(f"  {YELLOW}Purged {count} scan(s) for {domain}{RESET}")
     db.close()
@@ -2462,7 +2469,7 @@ def _run_waf_scan(targets, args):
 
     all_reports = []
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
         print(f"{CYAN}[*] WAF vulnerability scan: {domain}{RESET}", file=sys.stderr)
 
         scanner = WAFVulnScanner(domain, timeout=args.timeout, proxy=args.proxy, user_agent=args.user_agent)
@@ -2580,7 +2587,7 @@ def _run_cf_inject(targets, args):
     from .modules.cf_header_inject import test_cf_header_trust
 
     for target in targets:
-        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = _extract_domain(target)
         print(f"{CYAN}[*] Testing CF header injection: {domain}{RESET}", file=sys.stderr)
         result = test_cf_header_trust(domain, timeout=args.timeout, proxy=args.proxy)
 
@@ -2776,20 +2783,11 @@ def _run_direct_ip(targets, args):
                 continue
 
             # Skip CDN edge IPs, prioritize bypass-confirmed and high-confidence
-            cdn_waf_keywords = {
-                "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
-                "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
-                "stackpath", "cdn77", "bunny", "gcore", "limelight",
-                "stormwall", "radware", "barracuda", "f5 ", "fortinet",
-                "datadome", "perimeterx", "reblaze", "wallarm",
-                "netlify", "vercel",
-            }
-
             kept = []
             skipped = []
             for s in ip_stats:
                 provider_lower = (s.provider or "").lower()
-                if any(kw in provider_lower for kw in cdn_waf_keywords):
+                if any(kw in provider_lower for kw in CDN_WAF_KEYWORDS):
                     skipped.append(s)
                 else:
                     kept.append(s)
@@ -2860,7 +2858,7 @@ def _run_direct_ip(targets, args):
             candidates = []
             if cdn_ips:
                 status_cb("origins", "Subdomain origin leakage scan")
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
                 found = origin_finder.find_origins(domain, cdn_ips=cdn_ips)
                 candidates.extend([c for c in found if not c.get("is_cdn")])
 
@@ -2871,7 +2869,7 @@ def _run_direct_ip(targets, args):
 
             # Historical DNS (ViewDNS + SecurityTrails)
             status_cb("history", "Historical DNS lookup")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             historical = origin_finder.fetch_historical_ips(domain)
 
             for h in historical:
@@ -2882,7 +2880,7 @@ def _run_direct_ip(targets, args):
 
             # Favicon hash matching (Shodan/FOFA/ZoomEye)
             status_cb("origins", "Favicon hash matching")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             fav = origin_finder.fetch_favicon_hash(domain)
             if fav:
                 fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain)
@@ -2893,7 +2891,7 @@ def _run_direct_ip(targets, args):
 
             # Censys certificate search
             status_cb("origins", "Censys certificate search")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             censys_results = origin_finder.search_censys(domain)
             for r in censys_results:
                 if r["ip"] not in seen_ips:
@@ -2902,7 +2900,7 @@ def _run_direct_ip(targets, args):
 
             # GitHub leak search
             status_cb("origins", "GitHub repository leak search")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             github_results = origin_finder.search_github_leaks(domain)
             for r in github_results:
                 if r["ip"] not in seen_ips:
@@ -2911,7 +2909,7 @@ def _run_direct_ip(targets, args):
 
             # Shodan DNS records — only keep IPs for the target subdomain, not unrelated services
             status_cb("origins", "Shodan domain search")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             shodan_results = origin_finder.search_shodan_domain(domain)
             # Extract the subdomain prefix from target (e.g. "admin.pro.gms" from "admin.pro.gms.stratio.com")
             domain_parts = domain.split(".")
@@ -2927,7 +2925,7 @@ def _run_direct_ip(targets, args):
 
             # VirusTotal resolutions
             status_cb("origins", "VirusTotal domain lookup")
-            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+            _clear_status()
             vt_results = origin_finder.search_virustotal(domain)
             for r in vt_results:
                 if r["ip"] not in seen_ips:
@@ -2944,22 +2942,12 @@ def _run_direct_ip(targets, args):
             asn_info = _asn.lookup_asn_bulk(all_candidate_ips) if all_candidate_ips else []
             asn_map = {r["ip"]: r for r in asn_info}
 
-            cdn_waf_keywords = {
-                "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
-                "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
-                "stackpath", "cdn77", "bunny", "gcore", "limelight",
-                "stormwall", "radware", "barracuda", "f5 ", "fortinet",
-                "datadome", "perimeterx", "reblaze", "wallarm",
-                "azure front door", "aws shield", "google cloud armor",
-                "netlify", "vercel",
-            }
-
             kept = []
             skipped_cdn = []
             for t in test_ips:
                 asn = asn_map.get(t["ip"], {})
                 provider = asn.get("provider", "").lower()
-                if any(kw in provider for kw in cdn_waf_keywords):
+                if any(kw in provider for kw in CDN_WAF_KEYWORDS):
                     skipped_cdn.append(t)
                 else:
                     kept.append(t)
@@ -3029,21 +3017,12 @@ def _run_direct_ip(targets, args):
                 asn_info = _asn.lookup_asn_bulk(ips[:500])
                 asn_map = {r["ip"]: r for r in asn_info}
 
-                cdn_waf_keywords = {
-                    "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
-                    "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
-                    "stackpath", "cdn77", "bunny", "gcore", "limelight",
-                    "stormwall", "radware", "barracuda", "f5 ", "fortinet",
-                    "datadome", "perimeterx", "reblaze", "wallarm",
-                    "netlify", "vercel",
-                }
-
                 kept = []
                 skipped_cdn = []
                 for ip in ips:
                     asn = asn_map.get(ip, {})
                     provider = asn.get("provider", "").lower()
-                    if any(kw in provider for kw in cdn_waf_keywords):
+                    if any(kw in provider for kw in CDN_WAF_KEYWORDS):
                         skipped_cdn.append((ip, asn))
                     else:
                         kept.append(ip)
@@ -3059,7 +3038,7 @@ def _run_direct_ip(targets, args):
                     print(f"{RED}[!] All IPs are CDN/WAF edges — no origin candidates to test{RESET}", file=sys.stderr)
                     continue
 
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
                 ips = kept
 
         # Test each IP
@@ -3073,7 +3052,7 @@ def _run_direct_ip(targets, args):
                     user_agent=args.user_agent, on_status=status_cb,
                     path=path,
                 )
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
 
                 # Alt port scan
                 status_cb("bypass", f"Scanning alternative ports on {ip}")
@@ -3081,7 +3060,7 @@ def _run_direct_ip(targets, args):
                 alt_ports = scan_alt_ports(ip, domain, timeout=min(args.timeout, 3))
                 if alt_ports:
                     report["alt_ports"] = [p for p in alt_ports if p["port"] not in (80, 443)]
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
 
                 # Cloud metadata check (only for cloud-hosted IPs)
                 asn_provider = report.get("direct_ip_asn", {}).get("provider", "").lower()
@@ -3093,13 +3072,13 @@ def _run_direct_ip(targets, args):
                     metadata = probe_cloud_metadata(ip, timeout=3)
                     if metadata:
                         report["cloud_metadata"] = metadata
-                    sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                    _clear_status()
 
                 reports.append(report)
                 if not is_json:
                     _print_direct_ip_report(report)
             except Exception as e:
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
                 print(f"{RED}[!] Error: {target} → {ip}: {e}{RESET}", file=sys.stderr)
                 reports.append({"target": target, "ip": ip, "error": str(e)})
 
@@ -3496,7 +3475,7 @@ def _run_full(targets, args):
             print(f"{CYAN}[*] Scanning {target}...{RESET}", file=sys.stderr)
             try:
                 report = full_scan(target, **scan_kwargs)
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
                 reports.append(report)
                 if not is_json: _print_report(report)
                 # Persist scan data for cross-session history
@@ -3508,7 +3487,7 @@ def _run_full(targets, args):
                 except Exception:
                     pass
             except Exception as e:
-                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                _clear_status()
                 print(f"{RED}[!] Error: {target}: {e}{RESET}", file=sys.stderr)
                 reports.append({"target": target, "error": str(e)})
 

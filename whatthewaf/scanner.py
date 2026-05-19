@@ -8,7 +8,7 @@ from .modules import (
     waf_bypass, error_pages, tls_fingerprint, waf_evasion, proxy_manager,
 )
 
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+from .constants import DEFAULT_UA
 
 
 def fetch_response(url, timeout=10, user_agent=None, proxy=None):

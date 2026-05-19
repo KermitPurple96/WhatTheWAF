@@ -4,7 +4,7 @@ import hashlib
 import concurrent.futures
 import httpx
 
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+from ..constants import DEFAULT_UA
 
 # User-Agent strings to test
 TEST_USER_AGENTS = [

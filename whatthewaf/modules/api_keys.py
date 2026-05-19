@@ -38,7 +38,6 @@ _KEY_MAP = {
 
 _cache = None          # {key_name: [key1, key2, ...]}
 _failed = {}           # {key_name: {failed_key, ...}}
-_current_index = {}    # {key_name: int}
 
 
 def _load_keys():
@@ -200,7 +199,6 @@ def reload():
     global _cache
     _cache = None
     _failed.clear()
-    _current_index.clear()
 
 
 def init_config():
