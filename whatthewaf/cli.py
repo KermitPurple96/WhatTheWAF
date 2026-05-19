@@ -40,6 +40,12 @@ _VALUE_FLAGS = {
     "user_agent", "source_port", "tcp_options",
 }
 
+# Flags that support multiple comma-separated values for rotation
+_ROTATABLE_FLAGS = {"header_profile", "doh", "dot", "user_agent"}
+
+# Store rotation options (populated by _apply_profile)
+_rotation_pool = {}  # {flag_name: [value1, value2, ...]}
+
 
 def _list_profiles():
     """List all available profiles with their settings."""
@@ -122,21 +128,24 @@ def _apply_profile(args):
         attr = key.replace("-", "_")
 
         if attr in _BOOL_FLAGS:
-            # Only set if CLI didn't already enable it
             if not getattr(args, attr, False):
                 setattr(args, attr, value.lower() in ("true", "yes", "1", "on"))
         elif attr in _VALUE_FLAGS:
             current = getattr(args, attr, None)
-            # Only set if CLI didn't provide a value
-            if current is None or (isinstance(current, (int, float)) and attr in ("timeout", "delay", "random_delay", "listen_port", "workers") and current == {
-                "timeout": 10, "delay": 0, "random_delay": 0, "listen_port": 8888, "workers": 1
-            }.get(attr)):
-                if attr in ("listen_port", "timeout", "workers"):
-                    setattr(args, attr, int(value))
+            defaults = {"timeout": 10, "delay": 0, "random_delay": 0}
+            if current is None or (isinstance(current, (int, float)) and current == defaults.get(attr)):
+                # Parse comma-separated values for rotatable flags
+                values = [v.strip() for v in value.split(",") if v.strip()]
+                if attr in _ROTATABLE_FLAGS and len(values) > 1:
+                    _rotation_pool[attr] = values
+                    # Set the first value as default
+                    setattr(args, attr, values[0])
+                elif attr in ("timeout",):
+                    setattr(args, attr, int(values[0]))
                 elif attr in ("random_delay", "delay"):
-                    setattr(args, attr, float(value))
+                    setattr(args, attr, float(values[0]))
                 else:
-                    setattr(args, attr, value)
+                    setattr(args, attr, values[0])
 
 
 def main():
@@ -205,6 +214,8 @@ def main():
                         help="Proxy mode: log all requests")
     parser.add_argument("--random-delay", type=float, default=0,
                         help="Proxy mode: max random delay (secs) between requests to mimic human")
+    parser.add_argument("--rotate", type=int, default=0, metavar="MINS",
+                        help="MITM proxy: rotate profile options every N minutes (header profile, DNS, country)")
     parser.add_argument("--install-curl-impersonate", action="store_true",
                         help="Download and install curl-impersonate (Chrome/Firefox HTTP/2 emulation)")
     parser.add_argument("--tcp-profile", choices=["windows", "macos"],
@@ -812,8 +823,11 @@ def _run_proxy_mode(args):
 
 
 def _run_mitm_proxy(args):
-    """Start MITM proxy with dynamic cert generation."""
+    """Start MITM proxy with dynamic cert generation and optional rotation."""
     from .modules.mitm_proxy import MITMProxy
+    import random
+    import threading
+    import time
 
     proxy = MITMProxy(
         listen_host="127.0.0.1",
@@ -824,6 +838,47 @@ def _run_mitm_proxy(args):
         spoof_tls=not args.no_spoof_tls,
         verbose=args.proxy_verbose,
     )
+
+    # Rotation thread
+    rotate_mins = args.rotate
+    if rotate_mins > 0 and _rotation_pool:
+        def _rotate_loop():
+            while proxy.running:
+                time.sleep(rotate_mins * 60)
+                if not proxy.running:
+                    break
+                rotated = []
+                for flag, values in _rotation_pool.items():
+                    new_val = random.choice(values)
+                    rotated.append(f"{flag.replace('_', '-')}={new_val}")
+
+                    # Apply rotation
+                    if flag == "header_profile":
+                        try:
+                            from .modules.header_order import set_profile
+                            set_profile(new_val)
+                        except Exception:
+                            pass
+                    elif flag == "doh":
+                        try:
+                            from .modules.dns_encrypted import configure_doh
+                            configure_doh(new_val)
+                        except Exception:
+                            pass
+                    elif flag == "dot":
+                        try:
+                            from .modules.dns_encrypted import configure_dot
+                            configure_dot(new_val)
+                        except Exception:
+                            pass
+
+                print(f"  {YELLOW}[rotate] {', '.join(rotated)}{RESET}", file=sys.stderr)
+
+        pool_summary = {k: v for k, v in _rotation_pool.items()}
+        print(f"  {CYAN}[rotate] Every {rotate_mins}m: {pool_summary}{RESET}", file=sys.stderr)
+        t = threading.Thread(target=_rotate_loop, daemon=True)
+        t.start()
+
     proxy.start()
 
 

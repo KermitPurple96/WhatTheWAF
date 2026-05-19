@@ -187,7 +187,11 @@ sudo wtw --tcp-profile windows         # TTL=128, Windows TCP stack
 **Step 4 — Start MITM proxy (intercepts HTTPS, rewrites everything):**
 
 ```bash
+# Simple: fixed identity
 wtw --mitm --proton --proxy-verbose --random-delay 1 --listen-port 8888
+
+# With profile + auto-rotation every 5 minutes
+wtw --mitm --profile paranoid --rotate 5 --proxy-verbose --listen-port 8888
 ```
 
 The MITM proxy:
@@ -275,17 +279,13 @@ h2_rotate = true
 doh = cloudflare
 random_delay = 1
 
-[low-profile]
-doh = cloudflare
-random_delay = 2
-timeout = 15
-
 [paranoid]
+# Multiple values rotate with --rotate N (every N minutes)
 proton = true
 tls_rotate = true
 h2_rotate = true
-header_profile = chrome
-doh = cloudflare
+header_profile = chrome, firefox, safari, edge
+doh = cloudflare, google, quad9
 random_delay = 3
 auto_retry = true
 ```
@@ -295,9 +295,23 @@ Combine a profile with any action:
 ```bash
 wtw example.com --profile chrome-vpn --only waf        # WAF detection as Chrome via VPN
 wtw example.com --profile chrome-vpn --waf-scan        # Deep audit as Chrome via VPN
-wtw example.com --profile chrome-vpn --trace            # Trace as Chrome via VPN
 wtw example.com --profile paranoid --evasion            # Evasion with max stealth
-wtw --profile ?                                         # List available profiles
+wtw --profile ?                                         # List available profiles + options
+```
+
+### MITM with rotation
+
+The `--rotate` flag cycles through multi-value profile options every N minutes — changes header profile, DNS provider, etc. to look like different users over time:
+
+```bash
+# MITM proxy that rotates identity every 5 minutes
+wtw --mitm --profile paranoid --rotate 5 --listen-port 8888
+
+# [rotate] Every 5m: {'header_profile': ['chrome', 'firefox', 'safari', 'edge'], 'doh': ['cloudflare', 'google', 'quad9']}
+# ... 5 min later ...
+# [rotate] header-profile=firefox, doh=quad9
+# ... 5 min later ...
+# [rotate] header-profile=safari, doh=cloudflare
 ```
 
 CLI flags always override profile values. You can also pass a file path: `--profile /path/to/custom.conf`
@@ -351,6 +365,7 @@ targets                  Domain(s), IP(s), or @file.txt
 --no-spoof-tls           Don't modify TLS fingerprint
 --proxy-verbose          Log all requests
 --random-delay SECS      Random delay between requests
+--rotate MINS            Rotate multi-value profile options every N minutes
 
 # Stealth (combine with any scan or MITM proxy)
 --proton                 Route through ProtonVPN SOCKS
