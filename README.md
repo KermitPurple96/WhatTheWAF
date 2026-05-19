@@ -181,6 +181,7 @@ wtw --proton-check
 
 ```bash
 sudo wtw --tcp-profile windows         # TTL=128, Windows TCP stack
+# To revert when done: sudo wtw --tcp-revert
 ```
 
 **Step 4 — Start MITM proxy (intercepts HTTPS, rewrites everything):**
