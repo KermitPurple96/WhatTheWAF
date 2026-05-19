@@ -40,12 +40,21 @@ wtw example.com --json -o report.json  # JSON output
 
 90+ WAF/CDN signatures matched against HTTP headers, cookies, body, and error pages. When ASN identifies a CDN/WAF that headers don't reveal (e.g. Cloudflare with `server: nginx`), it's auto-detected. Error page probing (15 probes including SQLi, XSS, path traversal triggers) is included automatically.
 
+Example against nike.com:
+```
+WAF Detected: Akamai, AWS CloudFront
+WAF Active:   YES — blocking 5/5 attack payloads
+    BLOCKED [301] SQL injection probe (AWS CloudFront)
+    BLOCKED [301] XSS probe (AWS CloudFront)
+    BLOCKED [301] Path traversal probe (AWS CloudFront)
+```
+
 ### `--trace` — Infrastructure Trace
 
 Maps every layer of the traffic path and runs network traceroute:
 
 ```
-AWS CloudFront [CDN]  →  Akamai [CDN/WAF]  →  nginx [PROXY]  →  Next.js [FRAMEWORK]
+AWS CloudFront [CDN]  →  Akamai [CDN/WAF]  →  unified-edge-router [PROXY]  →  Next.js [FRAMEWORK]
 ```
 
 Fingerprints 11 layers: CDN/WAF, cache (Varnish, Squid), load balancers (HAProxy, F5, ALB), proxies (nginx, Envoy), hosting (SiteGround, WP Engine, Heroku), web servers (Apache, IIS), runtimes (PHP, Java, Node.js, Python), frameworks (Django, Laravel, Rails, Next.js), and CMS (WordPress, Drupal, Magento).
@@ -62,7 +71,15 @@ wtw example.com --trace --evasion            # Trace + evasion analysis
 
 ### `--tls` — TLS/SSL Audit
 
-Protocol enumeration (TLS 1.0–1.3), 35+ cipher suite testing (strong/acceptable/weak/insecure + PFS), certificate analysis (subject, issuer, key, SANs, validity, HSTS), vulnerability assessment, browser fingerprint comparison, and WAF TLS acceptance tests.
+Protocol enumeration (TLS 1.0–1.3), 35+ cipher suite testing with strength classification, certificate analysis, vulnerability assessment, and browser fingerprint comparison.
+
+Example against nike.com:
+```
+Protocol Support: TLSv1.2 ✓, TLSv1.3 ✓
+Certificate:      nike.com (Amazon RSA 2048), 167 days remaining, HSTS enabled
+Ciphers:          3 strong, 2 acceptable, 0 weak
+Vulnerabilities:  None found
+```
 
 ### `--ip` — WAF Bypass Testing
 
