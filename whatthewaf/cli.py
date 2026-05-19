@@ -2151,11 +2151,28 @@ def _run_trace(targets, args):
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
 
         # Phase 5: subdomain takeover check
+        # Feed subdomains from scan history + recon into the takeover scanner
         from .modules import subdomain_takeover
-        status_cb("trace", "Subdomain takeover check")
+        extra_subs = []
+        try:
+            from .modules.scan_persistence import ScanPersistence
+            db = ScanPersistence()
+            ip_stats = db.get_ip_stats(domain)
+            for s in ip_stats:
+                for src in s.sources:
+                    if src.startswith("subdomain:") or src.startswith("shodan:"):
+                        sub = src.split(":", 1)[1]
+                        if sub:
+                            extra_subs.append(sub)
+            db.close()
+        except Exception:
+            pass
+
+        status_cb("trace", "Subdomain takeover check (CNAME + NS)")
         sys.stderr.flush()
-        takeover = subdomain_takeover.scan_takeover(domain, timeout=min(args.timeout, 5),
-                                                     on_status=status_cb)
+        takeover = subdomain_takeover.scan_takeover(
+            domain, extra_subdomains=extra_subs,
+            timeout=min(args.timeout, 5), on_status=status_cb)
         report["takeover"] = takeover
         sys.stderr.write("\r\033[K"); sys.stderr.flush()
 

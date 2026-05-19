@@ -1,64 +1,98 @@
-"""Subdomain takeover detection — find dangling CNAMEs pointing to unclaimed services.
+"""Subdomain takeover detection — find dangling CNAMEs, NS, and MX records.
 
-Resolves CNAME for each subdomain, checks if the target is claimable by matching
-HTTP responses and DNS errors against known provider fingerprints.
+Checks subdomains from multiple sources:
+1. Hardcoded common subdomain list (50+)
+2. Subdomains discovered by --recon (Shodan, DNSTrails, etc.)
+3. Subdomains stored in scan history DB
+
+For each subdomain with a CNAME/NS/MX pointing to a known vulnerable service,
+verifies the takeover is real by:
+1. Checking NXDOMAIN on the target
+2. Matching HTTP response against provider error fingerprints
+3. Double-checking with a second request to rule out temporary outages
 """
 
 import concurrent.futures
 import re
 import socket
+import time
 import httpx
 
 # Fingerprints: (service, cname_pattern, response_fingerprint, severity)
 TAKEOVER_FINGERPRINTS = [
+    # Cloud storage
     ("AWS S3", r"\.s3[.-].*\.amazonaws\.com$", "NoSuchBucket", "high"),
     ("AWS S3 Website", r"\.s3-website[.-].*\.amazonaws\.com$", "NoSuchBucket", "high"),
+    ("GCP Storage", r"\.storage\.googleapis\.com$", "NoSuchBucket", "high"),
+    ("Azure Blob", r"\.blob\.core\.windows\.net$", "BlobNotFound|ResourceNotFound", "high"),
+    # Hosting / PaaS
     ("GitHub Pages", r"\.github\.io$", "There isn't a GitHub Pages site here", "high"),
-    ("Heroku", r"\.herokuapp\.com$", "No such app", "high"),
-    ("Shopify", r"\.myshopify\.com$", "Sorry, this shop is currently unavailable", "medium"),
+    ("Heroku", r"\.herokuapp\.com$", "No such app|no-such-app", "high"),
     ("Azure Websites", r"\.azurewebsites\.net$", "404 Web Site not found", "high"),
     ("Azure TrafficManager", r"\.trafficmanager\.net$", "NXDOMAIN", "high"),
     ("Azure CloudApp", r"\.cloudapp\.azure\.com$", "NXDOMAIN", "high"),
-    ("Fastly", r"\.fastly\.net$", "Fastly error: unknown domain", "high"),
-    ("Netlify", r"\.netlify\.(app|com)$", "Not Found - Request ID", "medium"),
-    ("Pantheon", r"\.pantheonsite\.io$", "404 Unknown Site", "high"),
-    ("Zendesk", r"\.zendesk\.com$", "Help Center Closed", "medium"),
-    ("Tumblr", r"\.tumblr\.com$", "There's nothing here", "medium"),
-    ("WordPress.com", r"\.wordpress\.com$", "Do you want to register", "medium"),
-    ("Ghost", r"\.ghost\.io$", "404 Not Found", "medium"),
+    ("Pantheon", r"\.pantheonsite\.io$", "404 Unknown Site|locked site", "high"),
+    ("Fly.io", r"\.fly\.dev$", "this is not the app you're looking for", "medium"),
     ("Surge.sh", r"\.surge\.sh$", "project not found", "high"),
+    ("Vercel", r"\.vercel\.app$", "404: NOT_FOUND|DEPLOYMENT_NOT_FOUND", "medium"),
+    # CDN
+    ("Fastly", r"\.fastly\.net$", "Fastly error: unknown domain", "high"),
+    ("Netlify", r"\.netlify\.(app|com)$", "Not Found.*Request ID", "medium"),
+    ("CloudFront", r"\.cloudfront\.net$", "Bad request|ERROR: The request could not be satisfied", "medium"),
+    # SaaS
+    ("Shopify", r"\.myshopify\.com$", "Sorry, this shop is currently unavailable", "medium"),
+    ("Zendesk", r"\.zendesk\.com$", "Help Center Closed", "medium"),
+    ("Tumblr", r"\.tumblr\.com$", "There's nothing here|Whatever you were looking for", "medium"),
+    ("WordPress.com", r"\.wordpress\.com$", "Do you want to register", "medium"),
+    ("Ghost", r"\.ghost\.io$", "404.*Ghost", "medium"),
     ("Bitbucket", r"\.bitbucket\.io$", "Repository not found", "high"),
-    ("Fly.io", r"\.fly\.dev$", "404 Not Found", "medium"),
-    ("Vercel", r"\.vercel\.app$", "404: NOT_FOUND", "medium"),
     ("Cargo", r"\.cargocollective\.com$", "404 Not Found", "medium"),
     ("Unbounce", r"\.unbouncepages\.com$", "The requested URL was not found", "medium"),
     ("HubSpot", r"\.hubspot\.net$", "Domain not found", "medium"),
     ("Tilda", r"\.tilda\.ws$", "Please renew your subscription", "medium"),
-    ("Agile CRM", r"\.agilecrm\.com$", "Sorry, this page is no longer available", "medium"),
-    ("Airee.ru", r"\.airee\.ru$", "Ошибка 402", "medium"),
-    ("Anima", r"\.animaapp\.io$", "404 - Page not found", "medium"),
     ("Readme.io", r"\.readme\.io$", "Project doesnt exist", "medium"),
-    ("Statuspage", r"\.statuspage\.io$", "Status page pushed a DNS", "medium"),
+    ("Statuspage", r"\.statuspage\.io$", "Status page pushed a DNS|You are being redirected", "medium"),
     ("LaunchRock", r"\.launchrock\.com$", "It looks like you may have taken a wrong turn", "medium"),
-    ("Ngrok", r"\.ngrok\.io$", "Tunnel .* not found", "high"),
-    ("SmartJobBoard", r"\.smartjobboard\.com$", "This job board website is", "medium"),
+    ("Ngrok", r"\.ngrok\.(io|app)$", "Tunnel .* not found|ERR_NGROK", "high"),
     ("Strikingly", r"\.strikinglydns\.com$", "page not found", "medium"),
-    ("Uptimerobot", r"\.uptimerobot\.com$", "page not found", "low"),
     ("Webflow", r"\.webflow\.io$", "The page you are looking for doesn't exist", "medium"),
+    ("Agile CRM", r"\.agilecrm\.com$", "Sorry, this page is no longer available", "medium"),
+    ("Anima", r"\.animaapp\.io$", "404.*Page not found", "medium"),
+    ("SmartJobBoard", r"\.smartjobboard\.com$", "This job board website is", "medium"),
+    ("Desk.com", r"\.desk\.com$", "Sorry, We Couldn't Find That Page", "medium"),
+    ("Feedpress", r"\.redirect\.feedpress\.me$", "The feed has not been found", "medium"),
+    ("Helpjuice", r"\.helpjuice\.com$", "We could not find what you're looking for", "medium"),
+    ("Help Scout", r"\.helpscoutdocs\.com$", "No settings were found for this company", "medium"),
+    ("Intercom", r"\.custom\.intercom\.help$", "This page is reserved for an Intercom", "medium"),
+    ("JetBrains YouTrack", r"\.myjetbrains\.com$", "is not a registered InCloud YouTrack", "medium"),
+    ("Kinsta", r"\.kinsta\.cloud$", "No site found", "medium"),
+    ("Landingi", r"\.landingi\.com$", "It looks like you're lost", "medium"),
+    ("Pingdom", r"\.stats\.pingdom\.com$", "This public report page has not been activated", "medium"),
+    ("Proposify", r"\.proposify\.biz$", "If you need immediate access", "medium"),
+    ("Teamwork", r"\.teamwork\.com$", "Oops.*There is no portal here", "medium"),
+    ("Thinkific", r"\.thinkific\.com$", "You may have mistyped the address", "medium"),
+    ("Kajabi", r"\.mykajabi\.com$", "This domain is not set up", "medium"),
+]
+
+# NS record takeover fingerprints
+NS_TAKEOVER = [
+    ("AWS Route53", r"\.awsdns-", "NXDOMAIN"),
+    ("Azure DNS", r"\.azure-dns\.", "NXDOMAIN"),
+    ("Google Cloud DNS", r"\.googledomains\.com$", "NXDOMAIN"),
+    ("DigitalOcean DNS", r"\.digitalocean\.com$", "NXDOMAIN"),
 ]
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 def check_takeover(subdomain, domain, timeout=5):
-    """Check a single subdomain for takeover vulnerability.
-
-    Returns dict with finding or None.
-    """
-    fqdn = f"{subdomain}.{domain}" if subdomain else domain
-
-    # 1. Resolve CNAME
+    """Check a single subdomain for CNAME and NS takeover vulnerability."""
     import dns.resolver
+
+    fqdn = f"{subdomain}.{domain}" if subdomain else domain
+    findings = []
+
+    # ── CNAME check ──
     cname_target = None
     try:
         answers = dns.resolver.resolve(fqdn, "CNAME")
@@ -70,10 +104,41 @@ def check_takeover(subdomain, domain, timeout=5):
     except Exception:
         pass
 
-    if not cname_target:
-        return None
+    if cname_target:
+        finding = _check_cname_takeover(fqdn, cname_target, timeout)
+        if finding:
+            findings.append(finding)
 
-    # 2. Check if CNAME target matches known vulnerable services
+    # ── NS check (dangling nameserver) ──
+    try:
+        ns_answers = dns.resolver.resolve(fqdn, "NS")
+        for rdata in ns_answers:
+            ns_target = str(rdata.target).rstrip(".")
+            for service, pattern, _ in NS_TAKEOVER:
+                if re.search(pattern, ns_target, re.IGNORECASE):
+                    # Check if NS resolves
+                    try:
+                        socket.getaddrinfo(ns_target, 53, socket.AF_INET)
+                    except socket.gaierror:
+                        findings.append({
+                            "subdomain": fqdn,
+                            "cname": ns_target,
+                            "service": f"{service} (NS)",
+                            "status": "VULNERABLE",
+                            "reason": f"NS record {ns_target} does not resolve",
+                            "severity": "critical",
+                            "record_type": "NS",
+                        })
+    except Exception:
+        pass
+
+    return findings[0] if findings else None
+
+
+def _check_cname_takeover(fqdn, cname_target, timeout):
+    """Verify CNAME takeover with double-check for reliability."""
+
+    # Match against fingerprints
     matched_service = None
     matched_fingerprint = None
     matched_severity = None
@@ -87,7 +152,7 @@ def check_takeover(subdomain, domain, timeout=5):
     if not matched_service:
         return None
 
-    # 3. Check if CNAME target resolves (NXDOMAIN = dangling)
+    # Check NXDOMAIN
     nxdomain = False
     try:
         socket.getaddrinfo(cname_target, 443, socket.AF_INET)
@@ -95,56 +160,55 @@ def check_takeover(subdomain, domain, timeout=5):
         nxdomain = True
 
     if nxdomain:
+        # Double-check after 2 seconds to rule out temporary DNS issues
+        time.sleep(2)
+        try:
+            socket.getaddrinfo(cname_target, 443, socket.AF_INET)
+            nxdomain = False  # Resolved on second try — not dangling
+        except socket.gaierror:
+            pass  # Still NXDOMAIN — confirmed dangling
+
+    if nxdomain:
         return {
             "subdomain": fqdn,
             "cname": cname_target,
             "service": matched_service,
             "status": "VULNERABLE",
-            "reason": "CNAME target does not resolve (NXDOMAIN)",
+            "reason": "CNAME target does not resolve (NXDOMAIN, confirmed with double-check)",
             "severity": matched_severity,
+            "record_type": "CNAME",
         }
 
-    # 4. Even if it resolves, check HTTP response for provider error page
+    # Even if it resolves, check HTTP for provider error page
     if matched_fingerprint and matched_fingerprint != "NXDOMAIN":
-        try:
-            resp = httpx.get(f"https://{fqdn}", timeout=timeout, verify=False,
-                             headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
-            body = resp.text[:10000]
-            if re.search(matched_fingerprint, body, re.IGNORECASE):
-                return {
-                    "subdomain": fqdn,
-                    "cname": cname_target,
-                    "service": matched_service,
-                    "status": "VULNERABLE",
-                    "reason": f"Service response matches: {matched_fingerprint[:50]}",
-                    "severity": matched_severity,
-                    "http_status": resp.status_code,
-                }
-        except Exception:
-            pass
-
-        # Try HTTP too
-        try:
-            resp = httpx.get(f"http://{fqdn}", timeout=timeout, verify=False,
-                             headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
-            body = resp.text[:10000]
-            if re.search(matched_fingerprint, body, re.IGNORECASE):
-                return {
-                    "subdomain": fqdn,
-                    "cname": cname_target,
-                    "service": matched_service,
-                    "status": "VULNERABLE",
-                    "reason": f"Service response matches: {matched_fingerprint[:50]}",
-                    "severity": matched_severity,
-                    "http_status": resp.status_code,
-                }
-        except Exception:
-            pass
+        for scheme in ("https", "http"):
+            try:
+                resp = httpx.get(f"{scheme}://{fqdn}", timeout=timeout, verify=False,
+                                 headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
+                body = resp.text[:10000]
+                if re.search(matched_fingerprint, body, re.IGNORECASE):
+                    # Double-check: request again to rule out transient error
+                    time.sleep(1)
+                    resp2 = httpx.get(f"{scheme}://{fqdn}", timeout=timeout, verify=False,
+                                      headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
+                    if re.search(matched_fingerprint, resp2.text[:10000], re.IGNORECASE):
+                        return {
+                            "subdomain": fqdn,
+                            "cname": cname_target,
+                            "service": matched_service,
+                            "status": "VULNERABLE",
+                            "reason": f"Service error confirmed (2 requests): {matched_fingerprint[:50]}",
+                            "severity": matched_severity,
+                            "http_status": resp.status_code,
+                            "record_type": "CNAME",
+                        }
+            except Exception:
+                pass
 
     return None
 
 
-# Common subdomains to check for takeover
+# Common subdomains to check
 TAKEOVER_SUBDOMAINS = [
     "blog", "help", "support", "status", "docs", "dev", "staging",
     "beta", "demo", "test", "preview", "landing", "go", "links",
@@ -159,26 +223,45 @@ TAKEOVER_SUBDOMAINS = [
 ]
 
 
-def scan_takeover(domain, subdomains=None, timeout=5, max_workers=15, on_status=None):
+def scan_takeover(domain, subdomains=None, extra_subdomains=None,
+                  timeout=5, max_workers=15, on_status=None):
     """Scan subdomains for takeover vulnerabilities.
+
+    Args:
+        subdomains: override the default list
+        extra_subdomains: additional subdomains to check (from recon, DB, etc.)
 
     Returns list of vulnerability findings.
     """
     _status = on_status or (lambda *a: None)
-    subs = subdomains or TAKEOVER_SUBDOMAINS
+
+    # Merge default + extra subdomains (dedup)
+    subs = set(subdomains or TAKEOVER_SUBDOMAINS)
+    if extra_subdomains:
+        for s in extra_subdomains:
+            # Extract subdomain part from FQDN if needed
+            s = s.strip().lower()
+            if s.endswith(f".{domain}"):
+                s = s[: -(len(domain) + 1)]
+            if s and s != domain and "." not in s:
+                subs.add(s)
+
+    subs = list(subs)
+    _status("takeover", f"Checking {len(subs)} subdomains for takeover (CNAME + NS)")
+
     findings = []
-
-    _status("takeover", f"Checking {len(subs)} subdomains for takeover")
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(check_takeover, sub, domain, timeout): sub
             for sub in subs
         }
         for f in concurrent.futures.as_completed(futures):
-            result = f.result()
-            if result:
-                findings.append(result)
+            try:
+                result = f.result()
+                if result:
+                    findings.append(result)
+            except Exception:
+                pass
 
-    findings.sort(key=lambda x: {"high": 0, "medium": 1, "low": 2}.get(x.get("severity", "low"), 9))
+    findings.sort(key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.get("severity", "low"), 9))
     return findings

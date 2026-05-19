@@ -168,69 +168,144 @@ def probe_cloud_metadata(ip, timeout=3):
 #  3. Cache poisoning tests
 # ──────────────────────────────────────────────────────────────
 
-# Headers that might be reflected but not part of cache key
+# Headers that might be reflected/used but not part of cache key
 POISON_HEADERS = [
-    ("X-Forwarded-Host", "evil.com"),
+    ("X-Forwarded-Host", "wtw-poison-test.com"),
     ("X-Forwarded-Scheme", "nothttps"),
-    ("X-Original-URL", "/admin"),
-    ("X-Rewrite-URL", "/admin"),
+    ("X-Original-URL", "/wtw-poison-test"),
+    ("X-Rewrite-URL", "/wtw-poison-test"),
     ("X-Forwarded-Proto", "http"),
-    ("X-Host", "evil.com"),
-    ("X-Forwarded-Server", "evil.com"),
+    ("X-Host", "wtw-poison-test.com"),
+    ("X-Forwarded-Server", "wtw-poison-test.com"),
+    ("X-Forwarded-Port", "1337"),
+    ("X-Forwarded-Prefix", "/wtw-poison-test"),
+    ("X-Custom-IP-Authorization", "127.0.0.1"),
+    ("Fastly-Client-IP", "127.0.0.1"),
+    ("CF-Connecting-IP", "127.0.0.1"),
+    ("True-Client-IP", "127.0.0.1"),
 ]
 
-# Extensions for cache deception
-CACHE_DECEPTION_EXTENSIONS = [
-    ".css", ".js", ".png", ".jpg", ".gif", ".svg",
-    ".woff", ".woff2", ".ico", ".avif", ".webp",
+# Extensions for cache deception testing
+CACHE_DECEPTION_PATHS = [
+    # Standard static extensions
+    "/nonexistent.css",
+    "/nonexistent.js",
+    "/nonexistent.png",
+    "/nonexistent.avif",
+    "/nonexistent.webp",
+    # Path confusion variants
+    ";/style.css",
+    "%00.css",
+    "/.css",
+    "/..%2f..%2fstyle.css",
+    "%2f.css",
 ]
+
+
+def _get_cache_indicators(resp):
+    """Extract cache-related info from response headers."""
+    hdrs = {k.lower(): v for k, v in resp.headers.items()}
+    return {
+        "cache_control": hdrs.get("cache-control", ""),
+        "age": hdrs.get("age", ""),
+        "x_cache": hdrs.get("x-cache", ""),
+        "cf_cache_status": hdrs.get("cf-cache-status", ""),
+        "x_cache_status": hdrs.get("x-cache-status", ""),
+        "via": hdrs.get("via", ""),
+        "is_cacheable": (
+            "no-store" not in hdrs.get("cache-control", "").lower()
+            and "private" not in hdrs.get("cache-control", "").lower()
+        ),
+        "is_cached": (
+            hdrs.get("x-cache", "").upper().startswith("HIT")
+            or hdrs.get("cf-cache-status", "").upper() == "HIT"
+            or hdrs.get("x-cache-status", "").upper() == "HIT"
+            or bool(hdrs.get("age", ""))
+        ),
+    }
 
 
 def test_cache_poisoning(url, timeout=5):
     """Test for cache poisoning and cache deception vulnerabilities.
 
+    Methodology:
+    1. Baseline: fetch with cache buster to get clean response
+    2. Header poisoning: inject each header, check if reflected or response changes
+    3. Verify cacheability: check Cache-Control, X-Cache, Age headers
+    4. Confirm cached: re-request WITHOUT the header, check if poison persists
+    5. Cache deception: path confusion with static extensions + variants
+
     Returns list of findings.
     """
-    findings = []
+    import random
+    import string
 
-    # 1. Get baseline response
+    findings = []
+    cache_buster = "".join(random.choices(string.ascii_lowercase, k=8))
+
+    # 1. Baseline with cache buster (guaranteed MISS)
     try:
-        baseline = httpx.get(url, timeout=timeout, verify=False,
+        baseline_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={cache_buster}"
+        baseline = httpx.get(baseline_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA})
         baseline_body = baseline.text[:10000]
         baseline_hash = hashlib.sha256(baseline_body.encode()).hexdigest()[:16]
+        baseline_cache = _get_cache_indicators(baseline)
     except Exception:
         return findings
 
     # 2. Test unkeyed header injection
     for header_name, header_value in POISON_HEADERS:
         try:
-            resp = httpx.get(url, timeout=timeout, verify=False,
+            # Request with poison header + new cache buster
+            cb = "".join(random.choices(string.ascii_lowercase, k=8))
+            poison_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={cb}"
+            resp = httpx.get(poison_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA, header_name: header_value})
             body = resp.text[:10000]
+            resp_cache = _get_cache_indicators(resp)
 
-            # Check if our injected value is reflected in the response
+            # Check if our injected value is reflected in the response body
             if header_value in body and header_value not in baseline_body:
+                # HIGH: value reflected — if cached, attacker controls page content
+                desc = f"{header_name}: {header_value} reflected in response body"
+                if resp_cache["is_cacheable"]:
+                    desc += f" (cacheable: {resp_cache['cache_control'] or 'no cache-control'})"
+
+                    # Confirm: re-request WITHOUT the header, same cache buster
+                    # If the response still contains our value → it was cached
+                    try:
+                        verify = httpx.get(poison_url, timeout=timeout, verify=False,
+                                           headers={"User-Agent": DEFAULT_UA})
+                        if header_value in verify.text[:10000]:
+                            desc += " — CONFIRMED CACHED (poison persists without header)"
+                            severity = "critical"
+                        else:
+                            severity = "high"
+                    except Exception:
+                        severity = "high"
+                else:
+                    severity = "medium"  # Reflected but not cacheable
+
                 findings.append({
                     "type": "cache_poisoning",
                     "title": f"Header reflected: {header_name}",
-                    "severity": "high",
-                    "description": f"{header_name}: {header_value} reflected in response body",
+                    "severity": severity,
+                    "description": desc,
                     "header": header_name,
                     "value": header_value,
                 })
+                continue  # Don't double-report
 
-            # Check if response differs (header influences rendering)
+            # Check if response differs (header influences server behavior)
             resp_hash = hashlib.sha256(body.encode()).hexdigest()[:16]
             if resp_hash != baseline_hash and resp.status_code == baseline.status_code:
-                # Check cache headers to see if this would be cached
-                cache_control = resp.headers.get("cache-control", "").lower()
-                if "no-store" not in cache_control and "private" not in cache_control:
+                if resp_cache["is_cacheable"]:
                     findings.append({
                         "type": "cache_poisoning",
                         "title": f"Response varies on unkeyed header: {header_name}",
                         "severity": "medium",
-                        "description": f"{header_name} changes response (cacheable: {cache_control or 'no cache-control'})",
+                        "description": f"{header_name} changes response (cacheable: {resp_cache['cache_control'] or 'no cache-control'})",
                         "header": header_name,
                     })
         except Exception:
@@ -238,28 +313,43 @@ def test_cache_poisoning(url, timeout=5):
 
     # 3. Test cache deception (path confusion)
     parsed = httpx.URL(url)
-    base_path = str(parsed.path).rstrip("/")
-    for ext in CACHE_DECEPTION_EXTENSIONS[:5]:  # limit to avoid noise
-        deception_url = f"{parsed.scheme}://{parsed.host}{base_path}/nonexistent{ext}"
+    base_path = str(parsed.path).rstrip("/") or ""
+
+    for suffix in CACHE_DECEPTION_PATHS:
+        deception_url = f"{parsed.scheme}://{parsed.host}{base_path}{suffix}"
         try:
             resp = httpx.get(deception_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
-            # If we get the same content as the original page with a static extension
             if resp.status_code == 200:
                 resp_hash = hashlib.sha256(resp.text[:10000].encode()).hexdigest()[:16]
+                resp_cache = _get_cache_indicators(resp)
+
+                # Same content as original page served under a static-looking path
                 if resp_hash == baseline_hash:
-                    cache_status = resp.headers.get("cf-cache-status", resp.headers.get("x-cache", ""))
+                    severity = "high" if resp_cache["is_cached"] else "medium"
+                    cache_info = resp_cache["cf_cache_status"] or resp_cache["x_cache"] or resp_cache["cache_control"] or "unknown"
                     findings.append({
                         "type": "cache_deception",
-                        "title": f"Path confusion: {ext} serves dynamic content",
-                        "severity": "medium",
-                        "description": f"{base_path}/nonexistent{ext} returns same content as {base_path}/ (cache: {cache_status})",
-                        "extension": ext,
+                        "title": f"Path confusion: {suffix}",
+                        "severity": severity,
+                        "description": f"{base_path}{suffix} returns same content as {base_path}/ (cache: {cache_info})",
+                        "path": suffix,
+                        "cached": resp_cache["is_cached"],
                     })
         except Exception:
             pass
 
-    return findings
+    # Deduplicate (same header shouldn't appear twice)
+    seen = set()
+    deduped = []
+    for f in findings:
+        key = f.get("header", f.get("path", f["title"]))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(f)
+
+    deduped.sort(key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x["severity"], 9))
+    return deduped
 
 
 # ──────────────────────────────────────────────────────────────
