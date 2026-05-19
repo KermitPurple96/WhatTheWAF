@@ -71,6 +71,15 @@ def _list_profiles():
                 flags.append(f"--{k_flag} {v}")
         print(f"  {GREEN}{BOLD}{section}{RESET}")
         print(f"    {DIM}{' '.join(flags)}{RESET}")
+    print(f"\n  {BOLD}Available options for profiles:{RESET}")
+    bool_list = ", ".join(f"--{f.replace('_', '-')}" for f in sorted(_BOOL_FLAGS))
+    val_list = ", ".join(f"--{f.replace('_', '-')}" for f in sorted(_VALUE_FLAGS))
+    print(f"    {DIM}On/off: {bool_list}{RESET}")
+    print(f"    {DIM}Values: {val_list}{RESET}")
+    dns_note = "DNS providers: cloudflare, google, quad9, adguard"
+    hdr_note = "Header profiles: chrome, firefox, safari, edge"
+    print(f"    {DIM}{dns_note}{RESET}")
+    print(f"    {DIM}{hdr_note}{RESET}")
     print(f"\n  Usage: {CYAN}wtw example.com --profile <name>{RESET}\n")
 
 
