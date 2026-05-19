@@ -167,6 +167,17 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
                 report["waf_detected"] = any(
                     d["category"] in ("WAF", "CDN/WAF") for d in report["waf"]
                 )
+
+                # WAF tier/plan detection
+                if report["waf_detected"]:
+                    from .modules.deep_scan import detect_waf_tier
+                    top_waf = next((d for d in report["waf"] if d["category"] in ("WAF", "CDN/WAF")), None)
+                    if top_waf:
+                        tier_info = detect_waf_tier(
+                            url, top_waf["name"],
+                            resp["headers"], resp["cookies"], resp["body"],
+                        )
+                        report["waf_tier"] = tier_info
         else:
             report["http"] = {"error": resp.get("error", "unknown")}
 

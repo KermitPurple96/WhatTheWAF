@@ -2150,6 +2150,23 @@ def _run_trace(targets, args):
                 report["traceroute_direct"][ip] = tr_direct
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
 
+        # Phase 5: subdomain takeover check
+        from .modules import subdomain_takeover
+        status_cb("trace", "Subdomain takeover check")
+        sys.stderr.flush()
+        takeover = subdomain_takeover.scan_takeover(domain, timeout=min(args.timeout, 5),
+                                                     on_status=status_cb)
+        report["takeover"] = takeover
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # Phase 6: cache poisoning test
+        from .modules.deep_scan import test_cache_poisoning
+        http_url = report.get("http", {}).get("url", f"https://{domain}")
+        status_cb("trace", "Cache poisoning tests")
+        sys.stderr.flush()
+        report["cache_poisoning"] = test_cache_poisoning(http_url, timeout=min(args.timeout, 5))
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
         all_reports.append({"target": domain, "report": report})
 
         if not is_json:
@@ -2277,6 +2294,25 @@ def _print_trace_report(domain, report):
     # Direct IP traceroutes (--ip)
     for ip, tr_direct in report.get("traceroute_direct", {}).items():
         _print_traceroute_hops(tr_direct, f"Traceroute → {ip} (direct)", YELLOW)
+
+    # Subdomain takeover
+    takeover = report.get("takeover", [])
+    if takeover:
+        _section(f"Subdomain Takeover ({len(takeover)} found)", RED)
+        for t in takeover:
+            sev_color = RED if t["severity"] == "high" else YELLOW
+            _line(f"{sev_color}{t['severity']:<6}{RESET} {BOLD}{t['subdomain']}{RESET}")
+            _line(f"       CNAME → {t['cname']} ({t['service']})")
+            _line(f"       {DIM}{t['reason']}{RESET}")
+
+    # Cache poisoning
+    cache = report.get("cache_poisoning", [])
+    if cache:
+        _section(f"Cache Vulnerabilities ({len(cache)} found)", RED)
+        for c in cache:
+            sev_color = RED if c["severity"] == "high" else YELLOW
+            _line(f"{sev_color}{c['severity']:<6}{RESET} {c['title']}")
+            _line(f"       {DIM}{c['description']}{RESET}")
 
     print()
 
@@ -3010,6 +3046,8 @@ def _run_direct_ip(targets, args):
                 ips = kept
 
         # Test each IP
+        from .modules.deep_scan import scan_alt_ports, probe_cloud_metadata
+
         for ip in ips:
             print(f"{CYAN}[*] Testing {domain} → {ip} (path: {path}){RESET}", file=sys.stderr)
             try:
@@ -3019,6 +3057,27 @@ def _run_direct_ip(targets, args):
                     path=path,
                 )
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+                # Alt port scan
+                status_cb("bypass", f"Scanning alternative ports on {ip}")
+                sys.stderr.flush()
+                alt_ports = scan_alt_ports(ip, domain, timeout=min(args.timeout, 3))
+                if alt_ports:
+                    report["alt_ports"] = [p for p in alt_ports if p["port"] not in (80, 443)]
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+                # Cloud metadata check (only for cloud-hosted IPs)
+                asn_provider = report.get("direct_ip_asn", {}).get("provider", "").lower()
+                cloud_keywords = {"amazon", "aws", "google", "gcp", "azure", "microsoft",
+                                  "digitalocean", "linode", "vultr", "oracle cloud"}
+                if any(k in asn_provider for k in cloud_keywords):
+                    status_cb("bypass", f"Cloud metadata probe on {ip}")
+                    sys.stderr.flush()
+                    metadata = probe_cloud_metadata(ip, timeout=3)
+                    if metadata:
+                        report["cloud_metadata"] = metadata
+                    sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
                 reports.append(report)
                 if not is_json:
                     _print_direct_ip_report(report)
@@ -3336,6 +3395,22 @@ def _print_direct_ip_report(report):
             if len(lines) > 60:
                 _line(f"{DIM}... ({len(lines) - 60} more lines){RESET}")
 
+    # Alternative ports
+    alt_ports = report.get("alt_ports", [])
+    if alt_ports:
+        _section("Alternative Ports", YELLOW)
+        for p in alt_ports:
+            title_str = f" {DIM}{p['title'][:40]}{RESET}" if p.get("title") else ""
+            _line(f"{GREEN}{p['scheme']}://{ip}:{p['port']}{RESET}  [{p['status']}] server={p.get('server', '?')}{title_str}")
+
+    # Cloud metadata
+    metadata = report.get("cloud_metadata", [])
+    if metadata:
+        _section("Cloud Metadata EXPOSED", RED)
+        for m in metadata:
+            _line(f"{RED}{m['severity']:<8}{RESET} {m['endpoint']}")
+            _line(f"         {DIM}{m['evidence'][:100]}{RESET}")
+
     # PoC curl command
     pinned = report.get("pinned_domains", [domain])
     _section("Reproduce", BOLD)
@@ -3551,6 +3626,13 @@ def _print_report(report):
             _line(f"{color}{det['name']:<22}{RESET} {DIM}[{cat:<10}]{RESET} conf={BOLD}{conf_pct}{RESET}")
             if det.get("evidence"):
                 _line(f"   {DIM}evidence: {', '.join(det['evidence'][:3])}{RESET}")
+
+        # WAF tier info
+        tier = report.get("waf_tier", {})
+        if tier.get("tier") and tier["tier"] != "unknown":
+            _line(f"\n   {YELLOW}Plan: {BOLD}{tier['tier']}{RESET} {DIM}(conf={tier.get('confidence', 0):.0%}){RESET}")
+            for ev in tier.get("evidence", []):
+                _line(f"   {DIM}  {ev}{RESET}")
 
     # Error Pages
     ep = report.get("error_pages", {})
