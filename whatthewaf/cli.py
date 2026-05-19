@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--only", metavar="MODULES",
                         help="Run only specific modules (comma-separated): waf, errors, tls, evasion, bypass, cert, subs, history, proxy")
     parser.add_argument("--ip", metavar="IP",
-                        help="IP(s) to test for WAF bypass (comma-separated), 'auto' to discover via OSINT, or 'history' to use stored IPs")
+                        help="IP(s) to test for WAF bypass — single IP, comma-separated, CIDR range (1.2.3.0/24), 'auto', or 'history'")
     parser.add_argument("--path", metavar="PATH", default="/",
                         help="Path to test in --ip mode (default: /)")
     parser.add_argument("--no-subs", action="store_true", help="Skip subdomain leakage scan")
@@ -310,7 +310,8 @@ def _http_get(url, proxy=None, timeout=10):
         # Python HTTP libs have issues with HTTP proxies for HTTPS (SSL to proxy instead of CONNECT)
         # curl handles this correctly, so we use it when a proxy is set
         try:
-            cmd = ["curl", "-s", "-x", proxy, "-k", "--max-time", str(timeout), url]
+            cmd = ["curl", "-s", "-x", proxy, "-k", "--connect-timeout", "5",
+                   "--max-time", str(timeout), url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
             if result.returncode == 0 and result.stdout.strip():
                 class CurlResponse:
@@ -319,9 +320,14 @@ def _http_get(url, proxy=None, timeout=10):
                     def json(self):
                         return _json.loads(self.text)
                 return CurlResponse()
+            elif result.stderr:
+                raise Exception(result.stderr.strip()[:100])
+            else:
+                raise Exception(f"curl exit code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            raise Exception("proxy timeout")
         except Exception:
-            pass
-        return None
+            raise
 
     resp = httpx.get(url, timeout=timeout, verify=False)
     return resp
@@ -2019,7 +2025,7 @@ def _resolve_trace_ips(ip_mode, domain, report, status_cb):
         return candidates[:5]
 
     # Explicit comma-separated IPs
-    return [ip.strip() for ip in ip_mode.split(",") if ip.strip()]
+    return _expand_ip_targets(ip_mode)
 
 
 def _print_trace_report(domain, report):
@@ -2163,6 +2169,31 @@ def _print_traceroute_hops(tr, title, color):
             _line(f"{DIM}{tr['error']}{RESET}")
         else:
             _line(f"{DIM}traceroute failed{RESET}")
+
+
+def _expand_ip_targets(ip_arg):
+    """Expand comma-separated IPs and CIDR ranges into a flat list.
+
+    Supports: 1.2.3.4, 1.2.3.0/24, 1.2.3.4,5.6.7.0/28
+    """
+    import ipaddress
+    ips = []
+    for part in ip_arg.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" in part:
+            try:
+                network = ipaddress.ip_network(part, strict=False)
+                # Skip network and broadcast for /31 and larger
+                hosts = list(network.hosts()) if network.prefixlen < 31 else list(network)
+                for host in hosts:
+                    ips.append(str(host))
+            except ValueError:
+                ips.append(part)  # not a valid CIDR, pass through
+        else:
+            ips.append(part)
+    return ips
 
 
 def _is_private_display(ip):
@@ -2758,8 +2789,8 @@ def _run_direct_ip(targets, args):
 
             ips = [t["ip"] for t in kept]
         else:
-            # Comma-separated IPs
-            ips = [ip.strip() for ip in args.ip.split(",") if ip.strip()]
+            # Comma-separated IPs and/or CIDR ranges
+            ips = _expand_ip_targets(args.ip)
 
         # Test each IP
         for ip in ips:
