@@ -127,28 +127,32 @@ shodan_api_key = key1, key2, key3
 ## ProtonVPN Setup
 
 ```bash
-# Install
+# Install (pip v2 CLI — don't use apt, it conflicts)
 pip install protonvpn-cli
 
-# First time setup
+# If you have the apt version installed, remove it first:
+sudo apt remove -y proton-vpn-cli 2>/dev/null
+
+# First time setup (needs sudo — use full path if sudo doesn't find it)
 sudo protonvpn init                    # Enter credentials + plan
 
 # Connect
-sudo protonvpn connect --cc NL         # Netherlands (needs sudo)
+sudo protonvpn connect --cc NL         # Netherlands
 sudo protonvpn connect --fastest       # Fastest server
 sudo protonvpn connect --random        # Random server
-sudo protonvpn connect NL#4            # Specific server
 
 # Check status
 sudo protonvpn status
 wtw --proton-check                     # Verify wtw can use it
 
-# Rotate IP (disconnect + reconnect to new server)
+# Rotate IP
 wtw --proton-rotate
 
 # Disconnect
 sudo protonvpn disconnect
 ```
+
+> If `sudo protonvpn` gives errors, sudo may find a different binary. Use the full path: `sudo $(which protonvpn) connect --cc NL`
 
 For GUI: enable SOCKS5 proxy on port 1080 in ProtonVPN settings, then use `--proton`.
 
