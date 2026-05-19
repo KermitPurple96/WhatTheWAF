@@ -30,6 +30,7 @@ wtw example.com --waf-scan --proton    # Deep WAF audit (use VPN)
 wtw example.com --scan-history         # View stored intelligence
 wtw example.com --origins              # Quick DNS + ASN classification
 wtw --whoami                           # Your current fingerprint
+wtw example.com --profile stealth      # Use a saved profile
 wtw example.com --json -o report.json  # JSON output
 ```
 
@@ -258,6 +259,44 @@ wtw target.com --proton --tls-rotate --header-profile chrome --doh cloudflare --
 
 > **CA trust:** The MITM proxy generates a CA at `/tmp/whatthewaf_ca/ca.crt`. For curl use `-k` (skip verify) or `--cacert /tmp/whatthewaf_ca/ca.crt`. For Burp, import the CA in `Settings → Network → TLS`.
 
+## Profiles
+
+Save flag combinations as named profiles in `~/.config/whatthewaf/profiles.conf` to avoid typing long commands:
+
+```ini
+[stealth]
+proton = true
+header_profile = chrome
+tls_rotate = true
+h2_rotate = true
+doh = cloudflare
+random_delay = 1
+
+[stealth-mitm]
+mitm = true
+proton = true
+proxy_verbose = true
+random_delay = 1
+listen_port = 8888
+
+[aggressive]
+waf_scan = true
+proton = true
+auto_retry = true
+header_profile = chrome
+```
+
+```bash
+wtw example.com --profile stealth          # Apply stealth settings
+wtw example.com --profile aggressive       # Deep WAF audit + VPN
+wtw --profile stealth-mitm                 # Start MITM proxy with presets
+
+# CLI flags override profile values:
+wtw example.com --profile stealth --timeout 20
+```
+
+You can also pass a file path: `wtw example.com --profile /path/to/custom.conf`
+
 ## Flags
 
 ```
@@ -265,6 +304,7 @@ wtw target.com --proton --tls-rotate --header-profile chrome --doh cloudflare --
 targets                  Domain(s), IP(s), or @file.txt
 --stdin                  Read from stdin
 -l, --list FILE          Read from file
+--profile NAME           Load settings from saved profile
 --origins                Quick DNS + ASN classification
 
 # Analysis

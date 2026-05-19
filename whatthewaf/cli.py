@@ -26,6 +26,81 @@ def _load_banner():
     return f"{CYAN}{BOLD}WhatTheWAF{RESET} {YELLOW}v{__version__}{RESET}\n"
 
 
+_PROFILES_PATH = os.path.expanduser("~/.config/whatthewaf/profiles.conf")
+
+# Boolean flags that can be set in profiles
+_BOOL_FLAGS = {
+    "proton", "tor", "tls_rotate", "h2_rotate", "auto_retry",
+    "evasion", "waf_scan", "trace", "mitm", "json", "quiet",
+    "no_spoof_ua", "no_spoof_tls", "proxy_verbose", "origins",
+    "no_tls", "no_subs", "no_cert", "history", "no_persist",
+}
+
+# String/int flags
+_VALUE_FLAGS = {
+    "header_profile", "proxy", "dot", "doh", "ip", "path",
+    "listen_port", "random_delay", "timeout", "delay", "workers",
+    "user_agent", "only", "waf_scan_layers", "source_port",
+    "tcp_options",
+}
+
+
+def _apply_profile(args):
+    """Load a profile from config file and apply as defaults (CLI flags override)."""
+    import configparser
+
+    profile_name = args.profile
+
+    # Check if it's a file path or a profile name
+    if os.path.isfile(profile_name):
+        config_path = profile_name
+        # Use the first section in the file
+        cp = configparser.ConfigParser()
+        cp.read(config_path)
+        sections = cp.sections()
+        if not sections:
+            print(f"{RED}[!] No sections found in {config_path}{RESET}", file=sys.stderr)
+            return
+        section = sections[0]
+    else:
+        config_path = _PROFILES_PATH
+        section = profile_name
+        if not os.path.isfile(config_path):
+            print(f"{RED}[!] Profile '{profile_name}' not found. Create: {config_path}{RESET}", file=sys.stderr)
+            return
+
+    cp = configparser.ConfigParser()
+    cp.read(config_path)
+
+    if not cp.has_section(section):
+        available = ", ".join(cp.sections()) if cp.sections() else "none"
+        print(f"{RED}[!] Profile '{section}' not found. Available: {available}{RESET}", file=sys.stderr)
+        return
+
+    if not args.quiet:
+        print(f"  {DIM}[profile] Loaded '{section}' from {config_path}{RESET}", file=sys.stderr)
+
+    for key, value in cp.items(section):
+        attr = key.replace("-", "_")
+
+        if attr in _BOOL_FLAGS:
+            # Only set if CLI didn't already enable it
+            if not getattr(args, attr, False):
+                setattr(args, attr, value.lower() in ("true", "yes", "1", "on"))
+        elif attr in _VALUE_FLAGS:
+            current = getattr(args, attr, None)
+            # Only set if CLI didn't provide a value
+            if current is None or (isinstance(current, (int, float)) and attr in ("timeout", "delay", "random_delay", "listen_port", "workers") and current == {
+                "timeout": 10, "delay": 0, "random_delay": 0, "listen_port": 8888, "workers": 1
+            }.get(attr)):
+                if attr in ("listen_port", "timeout", "workers"):
+                    setattr(args, attr, int(value))
+                elif attr in ("random_delay", "delay"):
+                    setattr(args, attr, float(value))
+                else:
+                    setattr(args, attr, value)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="WhatTheWAF - WAF/CDN Detection, Bypass, TLS Fingerprint Evasion & WAF Vulnerability Scanner",
@@ -49,6 +124,8 @@ def main():
   cat subs.txt | whatthewaf --stdin -m origins""",
     )
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
+    parser.add_argument("--profile", metavar="NAME",
+                        help="Load settings from profile (name in ~/.config/whatthewaf/profiles.conf or path to file)")
     parser.add_argument("--stdin", action="store_true", help="Read targets from stdin")
     parser.add_argument("-l", "--list", metavar="FILE", help="Read targets from file")
     parser.add_argument("-m", "--mode", choices=["origins", "full"], default="full",
@@ -185,6 +262,10 @@ def main():
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
 
     args = parser.parse_args()
+
+    # Load profile if specified (profile values are defaults, CLI flags override)
+    if args.profile:
+        _apply_profile(args)
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
