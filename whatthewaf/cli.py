@@ -106,6 +106,8 @@ def main():
                         help="Save screenshot when solving challenge")
     parser.add_argument("--stealth-status", action="store_true",
                         help="Show status of all evasion capabilities")
+    parser.add_argument("--whoami", action="store_true",
+                        help="Show your current fingerprint (IP, TLS, headers, geolocation)")
     parser.add_argument("--proton-check", action="store_true",
                         help="Check ProtonVPN status, connectivity, and IP rotation capability")
     parser.add_argument("--proton-rotate", action="store_true",
@@ -220,6 +222,9 @@ def main():
     if args.stealth_status:
         _run_stealth_status()
         return
+    if args.whoami:
+        _run_whoami()
+        return
     if args.install_curl_impersonate:
         _run_install_curl_impersonate()
         return
@@ -293,6 +298,104 @@ def main():
         _run_trace(targets, args)
     else:
         _run_full(targets, args)
+
+
+def _run_whoami():
+    """Show your current fingerprint — what servers see when you connect."""
+    import ssl
+    import socket
+    import httpx
+
+    print(f"\n{BOLD}Your Fingerprint{RESET}")
+    print("=" * 60)
+
+    # 1. Public IP + geolocation via ipquery.io
+    print(f"\n  {BOLD}Network{RESET}")
+    try:
+        resp = httpx.get("https://api.ipquery.io/?format=json", timeout=10, verify=False)
+        if resp.status_code == 200:
+            data = resp.json()
+            ip = data.get("ip", "?")
+            isp = data.get("isp", {})
+            location = data.get("location", {})
+            risk = data.get("risk", {})
+
+            print(f"    IP:          {BOLD}{ip}{RESET}")
+            if isp.get("org"):
+                print(f"    ISP:         {isp.get('isp', '')} ({isp.get('org', '')})")
+                print(f"    ASN:         AS{isp.get('asn', '?')}")
+            if location.get("country"):
+                city = location.get("city", "")
+                country = location.get("country", "")
+                print(f"    Location:    {city}, {country}" if city else f"    Location:    {country}")
+                if location.get("timezone"):
+                    print(f"    Timezone:    {location['timezone']}")
+
+            # Risk flags
+            risk_flags = []
+            if risk.get("is_vpn"): risk_flags.append("VPN")
+            if risk.get("is_tor"): risk_flags.append("Tor")
+            if risk.get("is_proxy"): risk_flags.append("Proxy")
+            if risk.get("is_datacenter"): risk_flags.append("Datacenter")
+            if risk_flags:
+                print(f"    Detected as: {YELLOW}{', '.join(risk_flags)}{RESET}")
+            else:
+                print(f"    Detected as: {GREEN}Residential{RESET}")
+    except Exception as e:
+        print(f"    {RED}Could not determine IP: {e}{RESET}")
+
+    # 2. TLS fingerprint
+    print(f"\n  {BOLD}TLS Fingerprint{RESET}")
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with socket.create_connection(("www.google.com", 443), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname="www.google.com") as ssock:
+                print(f"    TLS Version: {ssock.version()}")
+                cipher = ssock.cipher()
+                if cipher:
+                    print(f"    Cipher:      {cipher[0]}")
+                    print(f"    Bits:        {cipher[2]}")
+                alpn = ssock.selected_alpn_protocol()
+                print(f"    ALPN:        {alpn or f'{YELLOW}none (detectable){RESET}'}")
+        ciphers_count = len(ctx.get_ciphers())
+        if ciphers_count > 50:
+            print(f"    Cipher list: {YELLOW}{ciphers_count} suites (browsers use ~15 — detectable){RESET}")
+        else:
+            print(f"    Cipher list: {GREEN}{ciphers_count} suites{RESET}")
+    except Exception as e:
+        print(f"    {RED}Error: {e}{RESET}")
+
+    # 3. HTTP fingerprint
+    print(f"\n  {BOLD}HTTP Fingerprint{RESET}")
+    try:
+        resp = httpx.get("https://httpbin.org/headers", timeout=10, verify=False)
+        if resp.status_code == 200:
+            headers = resp.json().get("headers", {})
+            ua = headers.get("User-Agent", "?")
+            print(f"    User-Agent:  {DIM}{ua[:70]}{RESET}")
+            accept = headers.get("Accept", "")
+            if accept:
+                print(f"    Accept:      {DIM}{accept[:60]}{RESET}")
+            # Count headers — browsers send ~10, tools send fewer
+            hdr_count = len(headers)
+            print(f"    Headers:     {hdr_count} sent")
+    except Exception:
+        print(f"    {DIM}Could not reach httpbin.org{RESET}")
+
+    # 4. TCP fingerprint
+    try:
+        from .modules import tcp_fingerprint
+        tcp = tcp_fingerprint.get_status()
+        print(f"\n  {BOLD}TCP Fingerprint{RESET}")
+        print(f"    TTL:         {tcp['current_ttl']} → looks like: {YELLOW}{tcp['looks_like']}{RESET}")
+    except Exception:
+        pass
+
+    print(f"\n{'=' * 60}")
+    print()
 
 
 def _run_stealth_status():
@@ -738,8 +841,47 @@ def _run_recon(targets, args):
             intel["country"] = asn.get("country", "")
             intel["source_count"] = len(intel["sources"])
 
-        # Sort: most sources first, then non-CDN first
+        # === SSL CERT VALIDATION of non-CDN candidates ===
+        # Connect to each candidate IP:443 and check if cert matches target domain
+        cdn_waf_keywords = {
+            "cloudflare", "akamai", "fastly", "cloudfront", "incapsula",
+            "imperva", "sucuri", "ddos-guard", "stackpath",
+        }
+        candidates_to_verify = [
+            ip for ip, intel in ip_intel.items()
+            if intel.get("classification") != "CDN"
+            or not any(k in intel.get("provider", "").lower() for k in cdn_waf_keywords)
+        ][:15]  # cap at 15 to avoid slowness
+
+        if candidates_to_verify:
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [🔒] SSL cert validation ({len(candidates_to_verify)} candidate IPs){RESET}")
+                sys.stderr.flush()
+            import concurrent.futures
+            def _check_cert(ip):
+                return ip, origin_finder.check_ssl_cert(ip, domain, timeout=min(args.timeout, 5))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+                for ip, cert in pool.map(lambda ip: _check_cert(ip), candidates_to_verify):
+                    if cert:
+                        cn = cert.get("common_name", "")
+                        alt_names = cert.get("alt_names", [])
+                        # Check if cert matches target domain (exact or wildcard)
+                        all_names = [cn] + alt_names
+                        matches = any(
+                            n == domain or
+                            (n.startswith("*.") and domain.endswith(n[1:]))
+                            for n in all_names if n
+                        )
+                        if matches:
+                            ip_intel[ip]["sources"].add("ssl-verified")
+                            ip_intel[ip]["extra"]["cert_cn"] = cn
+                            ip_intel[ip]["extra"]["cert_match"] = True
+                            ip_intel[ip]["source_count"] = len(ip_intel[ip]["sources"])
+            sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # Sort: most sources first, then non-CDN first, cert-verified first
         ranked = sorted(ip_intel.items(), key=lambda x: (
+            -int(x[1].get("extra", {}).get("cert_match", False)),
             -x[1]["source_count"],
             x[1]["classification"] == "CDN",
             x[0],
@@ -816,8 +958,8 @@ def _run_recon(targets, args):
                     color = YELLOW
                     origin_candidates.append(ip)
 
-                bar = "█" * min(src_count, 10)
-                print(f"  {color}{ip:<17}{RESET} {asn_str:<10} {provider:<25} {color}{cls:<8}{RESET} {src_count:<5}{DIM}{sources_short}{RESET}")
+                cert_tag = f" {GREEN}[SSL ✓]{RESET}" if intel.get("extra", {}).get("cert_match") else ""
+                print(f"  {color}{ip:<17}{RESET} {asn_str:<10} {provider:<25} {color}{cls:<8}{RESET} {src_count:<5}{DIM}{sources_short}{RESET}{cert_tag}")
 
             print(f"  {'─' * 90}")
 
@@ -1317,13 +1459,22 @@ def _run_api_status():
         "whoxy_api_key": "Whoxy",
         "dnstrails_api_key": "DNSTrails",
     }
-    for key_name, configured in key_status.items():
+    for key_name, info in key_status.items():
         label = labels.get(key_name, key_name)
-        icon = f"{GREEN}✓{RESET}" if configured else f"{RED}✗{RESET}"
-        print(f"  {icon} {label:<25}")
+        configured = info["configured"]
+        count = info["count"]
+        failed = info["failed"]
+        if configured:
+            icon = f"{GREEN}✓{RESET}"
+            count_str = f" {DIM}({count} key{'s' if count > 1 else ''}){RESET}" if count > 1 else ""
+            fail_str = f" {RED}({failed} failed){RESET}" if failed else ""
+            print(f"  {icon} {label:<25}{count_str}{fail_str}")
+        else:
+            icon = f"{RED}✗{RESET}"
+            print(f"  {icon} {label:<25}")
 
     print(f"\n  Config file: {CYAN}{api_keys.config_path()}{RESET}")
-    print(f"  {DIM}Env vars always override config file.{RESET}")
+    print(f"  {DIM}Multiple keys per service: shodan_api_key = key1, key2, key3{RESET}")
     print(f"  {DIM}Run {CYAN}wtw --api-init{RESET}{DIM} to create template config.{RESET}")
     print()
 

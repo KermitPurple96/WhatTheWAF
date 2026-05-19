@@ -28,6 +28,7 @@ wtw example.com --evasion              # Quick WAF evasion recon
 wtw example.com --waf-scan --proton    # Deep WAF audit (use VPN)
 wtw example.com --scan-history         # View stored intelligence
 wtw example.com --origins              # Quick DNS + ASN classification
+wtw --whoami                           # Your current fingerprint
 wtw example.com --json -o report.json  # JSON output
 ```
 
@@ -87,7 +88,40 @@ All scans auto-store WAF detections, IPs, and findings in SQLite (`~/.local/shar
 
 ### `--recon` — Full OSINT
 
-Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails), correlates IPs, ranks by confidence.
+Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails), correlates IPs, ranks by confidence. IPs with matching SSL certificates get `[SSL ✓]` verification.
+
+### `--whoami` — Your Fingerprint
+
+Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Use before and after applying stealth flags to verify your changes work.
+
+### Stealth Usage
+
+Check your current fingerprint, then layer evasion techniques:
+
+```bash
+# 1. See what you look like now
+wtw --whoami
+
+# 2. Apply stealth layers to any scan
+wtw example.com --evasion --proton                      # Route through VPN
+wtw example.com --evasion --tls-rotate                  # Rotate TLS fingerprint per request
+wtw example.com --evasion --header-profile chrome       # Browser-accurate header ordering
+wtw example.com --evasion --dot cloudflare              # Encrypted DNS (prevent DNS leaks)
+wtw example.com --waf-scan --proton --auto-retry        # Deep audit with VPN + auto-retry
+
+# 3. Full stealth (combine everything)
+wtw example.com --proton --tls-rotate --h2-rotate --header-profile chrome --doh cloudflare
+
+# 4. Verify your new fingerprint
+wtw --whoami
+```
+
+TCP-level evasion (needs sudo):
+
+```bash
+sudo wtw --tcp-profile windows         # Change TTL/window to look like Windows
+sudo wtw --tcp-revert                  # Revert to Linux defaults
+```
 
 ## Flags
 
@@ -126,22 +160,30 @@ targets                  Domain(s), IP(s), or @file.txt
 --purge-history          Clear stored data
 --no-persist             Skip storing results
 
-# Stealth
+# Fingerprint
+--whoami                 Show your current fingerprint (IP, TLS, headers, TCP)
+--stealth-status         Show status of all evasion capabilities
+
+# Stealth (combine with any scan)
 --proton                 Route through ProtonVPN SOCKS
---proton-check           Check VPN status
---proton-rotate          Rotate VPN IP
 --proxy URL              HTTP/SOCKS proxy
---proxy-chain LIST       Test proxy chain against WAF
 --tor                    Tor IP rotation
 --tls-rotate             Rotate JA3/JA4 per request
 --h2-rotate              Rotate HTTP/2 fingerprint
 --header-profile BROWSER Header order (chrome/firefox/safari/edge)
---dot [PROVIDER]         DNS-over-TLS
---doh [PROVIDER]         DNS-over-HTTPS
+--dot [PROVIDER]         DNS-over-TLS (cloudflare/google/quad9/adguard)
+--doh [PROVIDER]         DNS-over-HTTPS (cloudflare/google/quad9/adguard)
 --auto-retry             Auto-retry on WAF blocks
---cf-inject              Test Cloudflare header spoofing
 
-# Protocol
+# Stealth (standalone tools)
+--proton-check           Check VPN status
+--proton-rotate          Rotate VPN IP
+--proxy-chain LIST       Test proxy chain effectiveness against WAF
+--cf-inject              Test Cloudflare header spoofing bypass
+--proxy-mode             Start stealth proxy (JA3 evasion + browser headers)
+--mitm                   Start MITM proxy (HTTPS interception)
+
+# Protocol probing
 --h3                     HTTP/3 QUIC probe
 --proto-probe            H1 vs H2 vs H3 comparison
 
@@ -149,10 +191,6 @@ targets                  Domain(s), IP(s), or @file.txt
 --tcp-profile PROFILE    TCP fingerprint: windows | macos
 --tcp-revert             Revert to Linux defaults
 --tcp-options PROFILE    TCP SYN options
-
-# Proxy mode
---proxy-mode             Start stealth proxy
---mitm                   Start MITM proxy
 
 # Output
 --json                   JSON output

@@ -1,16 +1,13 @@
 """API key management — loads keys from config file or environment variables.
 
+Supports multiple keys per service for automatic rotation when one gets banned:
+    [keys]
+    shodan_api_key = key1, key2, key3
+
 Keys are loaded in this priority order:
 1. Environment variables (highest priority)
 2. Config file: ~/.config/whatthewaf/api_keys.conf
 3. Project-local: .whatthewaf_keys (gitignored)
-
-Config file format (INI-style):
-    [keys]
-    shodan_api_key = YOUR_KEY
-    censys_api_id = YOUR_ID
-    censys_api_secret = YOUR_SECRET
-    ...
 """
 
 import os
@@ -39,11 +36,17 @@ _KEY_MAP = {
     "dnstrails_api_key":    "DNSTRAILS_API_KEY",
 }
 
-_cache = None
+_cache = None          # {key_name: [key1, key2, ...]}
+_failed = {}           # {key_name: {failed_key, ...}}
+_current_index = {}    # {key_name: int}
 
 
 def _load_keys():
-    """Load API keys from config file(s), then overlay env vars."""
+    """Load API keys from config file(s), then overlay env vars.
+
+    Each key can have multiple values separated by commas.
+    Returns dict of {key_name: [list of keys]}.
+    """
     keys = {}
 
     # Load from config file
@@ -55,43 +58,136 @@ def _load_keys():
                 for key in _KEY_MAP:
                     val = cp.get("keys", key, fallback="").strip()
                     if val:
-                        keys[key] = val
+                        # Split comma-separated keys, strip whitespace
+                        keys[key] = [k.strip() for k in val.split(",") if k.strip()]
             break  # use first file found
 
-    # Env vars override config file
+    # Env vars override config file (also support comma-separated)
     for key, env_var in _KEY_MAP.items():
         val = os.environ.get(env_var, "").strip()
         if val:
-            keys[key] = val
+            keys[key] = [k.strip() for k in val.split(",") if k.strip()]
 
     return keys
 
 
-def get(key_name):
-    """Get a single API key by config name (e.g. 'shodan_api_key').
-
-    Returns the key string, or empty string if not configured.
-    """
+def _ensure_loaded():
     global _cache
     if _cache is None:
         _cache = _load_keys()
-    return _cache.get(key_name, "")
+
+
+def get(key_name):
+    """Get the current active API key for a service.
+
+    Returns the first non-failed key, or empty string if none available.
+    Supports automatic rotation: if a key is marked as failed via mark_failed(),
+    this returns the next available key.
+    """
+    _ensure_loaded()
+    key_list = _cache.get(key_name, [])
+    if not key_list:
+        return ""
+
+    failed_set = _failed.get(key_name, set())
+
+    # Return first non-failed key
+    for k in key_list:
+        if k not in failed_set:
+            return k
+
+    # All keys failed — reset and try first again
+    _failed.pop(key_name, None)
+    return key_list[0]
+
+
+def request_with_rotation(key_name, make_request):
+    """Execute an API request with automatic key rotation on failure.
+
+    Args:
+        key_name: config key name (e.g. 'shodan_api_key')
+        make_request: callable(key_value) that makes the API call.
+            Must return the response object. Raises on network errors.
+
+    Returns the first successful response, or None if all keys fail.
+    Marks keys as failed on 401, 403, 429 status codes.
+    """
+    _ensure_loaded()
+    key_list = _cache.get(key_name, [])
+    if not key_list:
+        return None
+
+    failed_set = _failed.get(key_name, set())
+
+    for key_value in key_list:
+        if key_value in failed_set:
+            continue
+        try:
+            resp = make_request(key_value)
+            if resp.status_code in (401, 403, 429):
+                mark_failed(key_name, key_value)
+                continue
+            return resp
+        except Exception:
+            continue
+
+    return None
+
+
+def get_all_keys(key_name):
+    """Get all configured keys for a service (list)."""
+    _ensure_loaded()
+    return list(_cache.get(key_name, []))
+
+
+def mark_failed(key_name, key_value=None):
+    """Mark a key as failed/banned so get() skips it and returns the next one.
+
+    If key_value is None, marks the current active key.
+    Returns the next available key, or empty string if none left.
+    """
+    _ensure_loaded()
+    if key_value is None:
+        key_value = get(key_name)
+
+    if key_value:
+        if key_name not in _failed:
+            _failed[key_name] = set()
+        _failed[key_name].add(key_value)
+
+    return get(key_name)
+
+
+def reset_failed(key_name=None):
+    """Reset failed keys. If key_name is None, resets all."""
+    if key_name:
+        _failed.pop(key_name, None)
+    else:
+        _failed.clear()
 
 
 def get_all():
-    """Return dict of all configured API keys (non-empty only)."""
-    global _cache
-    if _cache is None:
-        _cache = _load_keys()
-    return dict(_cache)
+    """Return dict of all configured API keys (first active key per service)."""
+    _ensure_loaded()
+    return {name: get(name) for name in _KEY_MAP if get(name)}
 
 
 def status():
-    """Return dict of key_name -> bool (configured or not) for display."""
-    global _cache
-    if _cache is None:
-        _cache = _load_keys()
-    return {name: bool(_cache.get(name)) for name in _KEY_MAP}
+    """Return dict for --api-status display.
+
+    Each entry: key_name -> {"configured": bool, "count": int, "failed": int}
+    """
+    _ensure_loaded()
+    result = {}
+    for name in _KEY_MAP:
+        key_list = _cache.get(name, [])
+        failed_set = _failed.get(name, set())
+        result[name] = {
+            "configured": len(key_list) > 0,
+            "count": len(key_list),
+            "failed": len(failed_set & set(key_list)),
+        }
+    return result
 
 
 def config_path():
@@ -103,6 +199,8 @@ def reload():
     """Force reload keys (useful after editing config)."""
     global _cache
     _cache = None
+    _failed.clear()
+    _current_index.clear()
 
 
 def init_config():
@@ -118,11 +216,8 @@ def init_config():
 # Remove the # at the start of a line to activate it.
 # Environment variables (e.g. SHODAN_API_KEY) always override this file.
 #
-# Example — this is COMMENTED OUT (ignored):
-#   # shodan_api_key = xxxx
-#
-# This is ACTIVE (loaded):
-#   shodan_api_key = xxxx
+# Multiple keys per service (comma-separated) — auto-rotates if one gets banned:
+#   shodan_api_key = key1, key2, key3
 
 # shodan_api_key =
 # censys_api_id =
