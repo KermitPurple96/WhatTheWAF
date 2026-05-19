@@ -94,7 +94,58 @@ Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon h
 
 Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Use before and after applying stealth flags to verify your changes work.
 
-### Stealth Setup (full walkthrough)
+## API Keys
+
+Optional — the tool works without them. More keys = more origin discovery sources. Multiple keys per service for auto-rotation if one gets banned:
+
+```bash
+wtw --api-init       # Create config template
+wtw --api-status     # Check configured keys
+```
+
+Keys in `~/.config/whatthewaf/api_keys.conf` or environment variables (env vars override config):
+
+```ini
+[keys]
+# Single key:
+shodan_api_key = YOUR_KEY
+
+# Multiple keys (auto-rotates on 401/403/429):
+shodan_api_key = key1, key2, key3
+```
+
+| Service | Used For | Env Var |
+|---------|----------|---------|
+| Shodan | Favicon hash, DNS records | `SHODAN_API_KEY` |
+| Censys | Certificate-based origin discovery | `CENSYS_API_ID` + `CENSYS_API_SECRET` |
+| FOFA | Favicon hash (Asia-Pacific) | `FOFA_EMAIL` + `FOFA_KEY` |
+| SecurityTrails | Historical DNS | `SECURITYTRAILS_KEY` |
+| VirusTotal | Passive DNS | `VIRUSTOTAL_KEY` |
+| Whoxy | Reverse WHOIS → sibling domains | `WHOXY_API_KEY` |
+| DNSTrails | Historical DNS + subdomains | `DNSTRAILS_API_KEY` |
+
+## ProtonVPN Setup
+
+Two CLI versions exist — commands differ slightly:
+
+```bash
+# pip version (protonvpn-cli)
+pip install protonvpn-cli
+protonvpn init
+protonvpn connect --cc NL             # --cc for country code
+
+# apt version (proton-vpn-cli) — Kali/Debian
+sudo apt install -y proton-vpn-cli
+protonvpn login <username>
+protonvpn connect --country-code NL   # --country-code for country
+
+# Either way, verify with wtw
+wtw --proton-check
+```
+
+For GUI: enable SOCKS5 proxy on port 1080 in ProtonVPN settings, then use `--proton`.
+
+## Stealth Setup (full walkthrough)
 
 WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP/2, HTTP headers, DNS. To be invisible you need to cover all of them. Here's the full setup for a pentest engagement using Burp Suite.
 
@@ -109,7 +160,7 @@ wtw --whoami
 **Step 2 — Connect ProtonVPN (change IP + country):**
 
 ```bash
-protonvpn connect --cc NL              # Connect to Netherlands
+protonvpn connect --cc NL              # pip version (--country-code NL for apt version)
 wtw --proton-check                     # Verify SOCKS proxy is up
 ```
 
@@ -280,41 +331,3 @@ targets                  Domain(s), IP(s), or @file.txt
 --workers N              Concurrent workers
 ```
 
-## API Keys
-
-Optional — the tool works without them. More keys = more origin discovery sources.
-
-```bash
-wtw --api-init       # Create config template
-wtw --api-status     # Check configured keys
-```
-
-Keys in `~/.config/whatthewaf/api_keys.conf` or environment variables (env vars override config):
-
-| Service | Used For | Env Var |
-|---------|----------|---------|
-| Shodan | Favicon hash, DNS records | `SHODAN_API_KEY` |
-| Censys | Certificate-based origin discovery | `CENSYS_API_ID` + `CENSYS_API_SECRET` |
-| FOFA | Favicon hash (Asia-Pacific) | `FOFA_EMAIL` + `FOFA_KEY` |
-| SecurityTrails | Historical DNS | `SECURITYTRAILS_KEY` |
-| VirusTotal | Passive DNS | `VIRUSTOTAL_KEY` |
-| Whoxy | Reverse WHOIS → sibling domains | `WHOXY_API_KEY` |
-| DNSTrails | Historical DNS + subdomains | `DNSTRAILS_API_KEY` |
-
-## ProtonVPN Setup
-
-```bash
-# Install (Kali/Debian) — do NOT use pip install protonvpn-cli
-sudo apt install -y proton-vpn-cli
-
-# Setup
-protonvpn signin <username>
-protonvpn connect
-
-# Use
-wtw --proton-check
-wtw example.com --proton --waf-scan
-wtw --proton-rotate
-```
-
-For GUI: enable SOCKS5 proxy on port 1080 in ProtonVPN settings, then use `--proton`.
