@@ -66,11 +66,11 @@ Protocol enumeration (TLS 1.0–1.3), 35+ cipher suite testing (strong/acceptabl
 
 ### `--ip` — WAF Bypass Testing
 
-Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges.
+Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges. All IPs are ASN-classified before testing — CDN/WAF edge IPs (Cloudflare, Akamai, etc.) are automatically skipped to prevent false positives.
 
 | Mode | What it does |
 |------|-------------|
-| `--ip 1.2.3.4` | Test specific IP(s) |
+| `--ip 1.2.3.4` | Test specific IP(s) — CDN edges auto-filtered |
 | `--ip 1.2.3.0/24` | Test all 254 IPs in a /24 range |
 | `--ip auto` | Discover origin IPs via OSINT and test all |
 | `--ip history` | Re-test stored IPs from previous scans — no API calls |
