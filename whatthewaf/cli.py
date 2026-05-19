@@ -33,7 +33,7 @@ def main():
         epilog="""examples:
   whatthewaf example.com
   whatthewaf example.com --only waf
-  whatthewaf example.com --direct-ip auto
+  whatthewaf example.com --ip auto
   whatthewaf example.com --evasion
   whatthewaf example.com --waf-scan
 
@@ -51,20 +51,25 @@ def main():
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
     parser.add_argument("--stdin", action="store_true", help="Read targets from stdin")
     parser.add_argument("-l", "--list", metavar="FILE", help="Read targets from file")
-    parser.add_argument("-m", "--mode", choices=["origins", "full"], default="full")
+    parser.add_argument("-m", "--mode", choices=["origins", "full"], default="full",
+                        help="Scan mode (default: full)")
+    parser.add_argument("--origins", action="store_true",
+                        help="Quick DNS + ASN classification (which IPs are CDN vs origin)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("-o", "--output", metavar="FILE")
     parser.add_argument("--only", metavar="MODULES",
-                        help="Run only specific modules (comma-separated): ips, waf, errors, tls, evasion, bypass, cert, subs, history, proxy")
-    parser.add_argument("--direct-ip", metavar="IP",
-                        help="IP(s) to connect directly (comma-separated), or 'auto' to discover and test origin IPs")
+                        help="Run only specific modules (comma-separated): waf, errors, tls, evasion, bypass, cert, subs, history, proxy")
+    parser.add_argument("--ip", metavar="IP",
+                        help="IP(s) to test for WAF bypass (comma-separated), 'auto' to discover via OSINT, or 'history' to use stored IPs")
     parser.add_argument("--path", metavar="PATH", default="/",
-                        help="Path to test in direct-ip mode (default: /)")
+                        help="Path to test in --ip mode (default: /)")
     parser.add_argument("--no-subs", action="store_true", help="Skip subdomain leakage scan")
     parser.add_argument("--no-cert", action="store_true", help="Skip SSL certificate check")
     parser.add_argument("--no-tls", action="store_true", help="Skip TLS fingerprint analysis")
     parser.add_argument("--history", action="store_true", help="Check historical DNS records")
     parser.add_argument("--evasion", action="store_true", help="Run WAF evasion analysis (UA, encoding, methods)")
+    parser.add_argument("--trace", action="store_true", help="Trace infrastructure chain (CDN → proxy → origin) with full TLS audit")
+    parser.add_argument("--tls", action="store_true", help="TLS/SSL audit: protocols, ciphers, certificate, vulnerabilities")
     parser.add_argument("--proxy-chain", metavar="PROXIES", help="Comma-separated proxy URLs to test")
     parser.add_argument("--proton", action="store_true", help="Use ProtonVPN SOCKS proxy (socks5://127.0.0.1:1080)")
     parser.add_argument("--timeout", type=int, default=10)
@@ -270,7 +275,9 @@ def main():
         _run_purge_history(targets, args)
         return
 
-    if args.proto_probe:
+    if args.tls:
+        _run_tls_audit(targets, args)
+    elif args.proto_probe:
         _run_proto_probe(targets, args)
     elif args.h3:
         _run_h3_probe(targets, args)
@@ -278,10 +285,12 @@ def main():
         _run_waf_scan(targets, args)
     elif args.cf_inject:
         _run_cf_inject(targets, args)
-    elif args.direct_ip:
+    elif args.ip and not args.trace:
         _run_direct_ip(targets, args)
-    elif args.mode == "origins":
+    elif args.mode == "origins" or args.origins:
         _run_origins(targets, args)
+    elif args.trace:
+        _run_trace(targets, args)
     else:
         _run_full(targets, args)
 
@@ -844,7 +853,7 @@ def _run_recon(targets, args):
                     test_ips = origin_candidates[:10]
                 ip_list = ",".join(test_ips[:15])
                 print(f"\n  {BOLD}Next Steps{RESET}")
-                print(f"    {CYAN}wtw {domain} --direct-ip {ip_list}{RESET}")
+                print(f"    {CYAN}wtw {domain} --ip {ip_list}{RESET}")
                 if len(test_ips) > 15:
                     print(f"    {DIM}({len(test_ips) - 15} more IPs not shown — use --json for full list){RESET}")
             print()
@@ -1126,7 +1135,7 @@ def _run_osint(targets, args):
                 print(f"    {GREEN}{ip:<16}{RESET}  via {YELLOW}{src_str}{RESET}")
             ip_list = ",".join(all_ips.keys())
             print(f"\n  {BOLD}Test for bypass:{RESET}")
-            print(f"    {CYAN}wtw {domain} --direct-ip {ip_list}{RESET}")
+            print(f"    {CYAN}wtw {domain} --ip {ip_list}{RESET}")
             print()
 
         report["unique_ips"] = [{"ip": ip, "sources": srcs} for ip, srcs in all_ips.items()]
@@ -1462,10 +1471,12 @@ def _run_scan_history(targets, args):
         history = db.get_scan_history(domain)
         finding_stats = db.get_finding_stats(domain)
         ip_stats = db.get_ip_stats(domain)
+        detections = db.get_detections(domain)
 
         result = {
             "domain": domain,
             "scan_history": history,
+            "detections": detections,
             "finding_stats": [
                 {
                     "title": s.title,
@@ -1502,19 +1513,38 @@ def _run_scan_history(targets, args):
             print(f"\n{BOLD}{CYAN}  Scan History: {domain}{RESET}")
             print(f"  {'─' * 50}")
 
-            if not history:
-                print(f"  {DIM}No scan history found for this domain.{RESET}")
-                print(f"  Run: wtw {domain} --waf-scan")
+            has_any = history or detections or ip_stats
+            if not has_any:
+                print(f"  {DIM}No history found for this domain.{RESET}")
+                print(f"  Run: wtw {domain}")
                 continue
 
-            print(f"\n  {BOLD}Scans ({len(history)}):{RESET}")
-            for h in history[:10]:
-                ts = datetime.datetime.fromtimestamp(h["timestamp"]).strftime("%Y-%m-%d %H:%M")
-                print(f"    {DIM}{ts}{RESET}  {h['scan_type']:<10}  {h['total_findings']} findings  ({h.get('duration_seconds', 0):.1f}s)")
+            if history:
+                print(f"\n  {BOLD}Scans ({len(history)}):{RESET}")
+                for h in history[:10]:
+                    ts = datetime.datetime.fromtimestamp(h["timestamp"]).strftime("%Y-%m-%d %H:%M")
+                    meta = ""
+                    if h.get("total_findings"):
+                        meta = f"  {h['total_findings']} findings"
+                    print(f"    {DIM}{ts}{RESET}  {h['scan_type']:<10}{meta}  ({h.get('duration_seconds', 0):.1f}s)")
+
+            if detections:
+                print(f"\n  {BOLD}WAF/CDN Detections ({len(detections)}):{RESET}")
+                for d in detections:
+                    ts = datetime.datetime.fromtimestamp(d["last_seen"]).strftime("%Y-%m-%d")
+                    cat_color = RED if "WAF" in d["category"] else YELLOW
+                    print(
+                        f"    {cat_color}{d['name']:<22}{RESET} "
+                        f"[{d['category']}]  "
+                        f"conf: {d['confidence']:.0%}  "
+                        f"seen {d['times_seen']}x  "
+                        f"{DIM}last: {ts}{RESET}"
+                    )
+                    if d.get("evidence"):
+                        print(f"      {DIM}{d['evidence'][:80]}{RESET}")
 
             if finding_stats:
-                print(f"\n  {BOLD}Finding Statistics ({len(finding_stats)} unique):{RESET}")
-                # Show critical/high first
+                print(f"\n  {BOLD}WAF Scan Findings ({len(finding_stats)} unique):{RESET}")
                 important = [s for s in finding_stats if s.severity in ("critical", "high", "medium")]
                 for s in important[:20]:
                     stab_color = GREEN if s.stability == "stable" else YELLOW if s.stability == "intermittent" else RED if s.stability == "rare" else CYAN
@@ -1529,17 +1559,24 @@ def _run_scan_history(targets, args):
                     print(f"      {DIM}{s.title[:70]}{RESET}")
 
             if ip_stats:
-                print(f"\n  {BOLD}Recon IPs ({len(ip_stats)} tracked):{RESET}")
+                print(f"\n  {BOLD}Known IPs ({len(ip_stats)} tracked):{RESET}")
                 for s in ip_stats[:15]:
                     bypass_tag = f" {GREEN}[BYPASS]{RESET}" if s.bypass_confirmed else ""
-                    cls_tag = f" ({s.classification})" if s.classification else ""
+                    cls_color = RED if s.classification == "CDN" else GREEN
+                    cls_tag = f" {cls_color}[{s.classification}]{RESET}" if s.classification else ""
+                    prov = f" {DIM}{s.provider}{RESET}" if s.provider else ""
                     print(
                         f"    {s.ip:<18} "
                         f"seen {s.times_seen}x  "
                         f"conf: {s.confidence:.0%}  "
                         f"sources: {','.join(s.sources)}"
-                        f"{cls_tag}{bypass_tag}"
+                        f"{cls_tag}{prov}{bypass_tag}"
                     )
+
+                # Suggest --ip history if there are non-CDN IPs
+                non_cdn = [s for s in ip_stats if s.classification != "CDN"]
+                if non_cdn:
+                    print(f"\n  {DIM}Test stored IPs: wtw {domain} --ip history{RESET}")
 
             print()
 
@@ -1547,6 +1584,419 @@ def _run_scan_history(targets, args):
         _write_output(json.dumps(all_results, indent=2, default=str), args.output)
 
     db.close()
+
+
+def _run_tls_audit(targets, args):
+    """Standalone TLS/SSL audit — protocols, ciphers, cert, vulns."""
+    from .modules import tls_fingerprint
+
+    is_json = args.json
+    status_cb = _make_status_callback(quiet=is_json)
+    all_reports = []
+
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        print(f"{CYAN}[*] TLS/SSL audit: {domain}{RESET}", file=sys.stderr)
+
+        result = tls_fingerprint.analyze_tls_fingerprint(
+            domain, timeout=args.timeout, on_status=status_cb)
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+        all_reports.append({"target": domain, "tls": result})
+
+        if not is_json:
+            _print_tls_report(domain, result)
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _print_tls_report(domain, tls):
+    """Print standalone TLS audit results."""
+    W = max(len(domain) + 16, 60)
+    print(f"\n{BOLD}{CYAN}╔{'═' * W}╗{RESET}")
+    print(f"{BOLD}{CYAN}║  TLS Audit: {domain}{' ' * max(W - len(domain) - 14, 1)}║{RESET}")
+    print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
+
+    if tls.get("error"):
+        print(f"\n  {RED}Error: {tls['error']}{RESET}")
+        return
+
+    # Connection info
+    _section("Connection", BLUE)
+    _line(f"TLS Version:  {BOLD}{tls.get('our_tls_version', '?')}{RESET}")
+    _line(f"Cipher:       {tls.get('our_cipher', '?')}")
+    _line(f"ALPN:         {tls.get('our_alpn') or f'{YELLOW}none{RESET}'}")
+
+    # Protocol support
+    protocols = tls.get("protocols", {})
+    if protocols:
+        _section("Protocol Support", BLUE)
+        for proto_name in ("TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"):
+            p = protocols.get(proto_name, {})
+            if p.get("supported"):
+                deprecated = proto_name in ("TLSv1.0", "TLSv1.1", "SSLv3")
+                color = RED if deprecated else GREEN
+                icon = "!" if deprecated else "+"
+                cipher_info = f"  {DIM}{p.get('cipher', '')}{RESET}" if p.get("cipher") else ""
+                _line(f"{color}[{icon}] {proto_name:<10}{RESET}{cipher_info}")
+            elif proto_name in protocols:
+                _line(f"{DIM}[-] {proto_name}{RESET}")
+
+    # Certificate
+    cert = tls.get("certificate", {})
+    if cert and not cert.get("error"):
+        _section("Certificate", BLUE)
+        if cert.get("subject"):
+            _line(f"Subject:     {BOLD}{cert['subject']}{RESET}")
+        if cert.get("issuer"):
+            org = f" ({cert['issuer_org']})" if cert.get("issuer_org") else ""
+            _line(f"Issuer:      {cert['issuer']}{org}")
+        if cert.get("key_type"):
+            bits = f" {cert['key_bits']}" if cert.get("key_bits") else ""
+            _line(f"Key:         {cert['key_type']}{bits} bits")
+        if cert.get("sig_algorithm"):
+            _line(f"Signature:   {cert['sig_algorithm']}")
+        if cert.get("serial"):
+            _line(f"Serial:      {DIM}{cert['serial']}{RESET}")
+        if cert.get("days_remaining") is not None:
+            days = cert["days_remaining"]
+            if cert.get("expired"):
+                _line(f"Validity:    {RED}EXPIRED ({abs(days)} days ago){RESET}")
+            elif days < 30:
+                _line(f"Validity:    {YELLOW}{days} days remaining{RESET}")
+            else:
+                _line(f"Validity:    {GREEN}{days} days remaining{RESET}")
+        if cert.get("self_signed"):
+            _line(f"             {RED}Self-signed certificate{RESET}")
+        if cert.get("hsts"):
+            max_age = cert.get("hsts_max_age", 0)
+            color = GREEN if max_age >= 31536000 else YELLOW
+            _line(f"HSTS:        {color}enabled (max-age={max_age}){RESET}")
+        else:
+            _line(f"HSTS:        {RED}not enabled{RESET}")
+        if cert.get("san"):
+            sans = cert["san"]
+            _line(f"SANs ({len(sans)}):")
+            for san in sans[:10]:
+                _line(f"  {DIM}{san}{RESET}")
+            if len(sans) > 10:
+                _line(f"  {DIM}... +{len(sans) - 10} more{RESET}")
+
+    # Ciphers
+    ciphers = tls.get("ciphers", [])
+    if ciphers:
+        _section("Accepted Ciphers", BLUE)
+        strength_colors = {"strong": GREEN, "acceptable": CYAN, "weak": YELLOW, "insecure": RED}
+        # Group by strength
+        for strength in ("strong", "acceptable", "weak", "insecure"):
+            group = [c for c in ciphers if c["strength"] == strength]
+            if group:
+                color = strength_colors[strength]
+                print(f"\n    {color}{BOLD}{strength.upper()} ({len(group)}){RESET}")
+                for c in group:
+                    pfs_tag = "" if c.get("pfs") else f" {YELLOW}[no PFS]{RESET}"
+                    _line(f"  {color}{'●'}{RESET} {c['name']:<45} {DIM}{c.get('bits', '')}bit{RESET}{pfs_tag}")
+
+    # Vulnerabilities
+    vulns = tls.get("vulnerabilities", [])
+    if vulns:
+        _section("Vulnerabilities", RED)
+        sev_colors = {"critical": RED, "high": RED, "medium": YELLOW, "low": CYAN, "info": DIM}
+        for v in vulns:
+            color = sev_colors.get(v["severity"], DIM)
+            _line(f"{color}{v['severity']:<9}{RESET} {v['title']}")
+            _line(f"          {DIM}{v['description']}{RESET}")
+    else:
+        _section("Vulnerabilities", GREEN)
+        _line(f"{GREEN}No TLS vulnerabilities found{RESET}")
+
+    # Fingerprint
+    if tls.get("browser_differences"):
+        _section("Fingerprint vs Browsers", MAGENTA)
+        for diff in tls["browser_differences"]:
+            _line(f"{YELLOW}{diff}{RESET}")
+        for rec in tls.get("recommendations", []):
+            _line(f"{GREEN}→ {rec}{RESET}")
+
+    # WAF config tests
+    config_tests = tls.get("config_tests", [])
+    if config_tests:
+        _section("WAF TLS Acceptance", BLUE)
+        for t in config_tests:
+            if t.get("error"):
+                _line(f"{RED}✗ {t['config']:<25}{RESET} {DIM}{t['error']}{RESET}")
+            elif t.get("accepted"):
+                _line(f"{GREEN}✓ {t['config']:<25}{RESET} [{t.get('status_code', '?')}] {DIM}{t.get('tls_version', '')} {t.get('cipher', '')}{RESET}")
+            else:
+                _line(f"{YELLOW}✗ {t['config']:<25}{RESET} [{t.get('status_code', '?')}] {DIM}rejected{RESET}")
+
+    print()
+
+
+def _run_trace(targets, args):
+    """Trace infrastructure chain — CDN, proxies, LBs, hosting, origin, frameworks.
+
+    Combinable with --ip (traceroute to origin IPs) and --evasion.
+    """
+    from .modules import infra_trace, dns_resolver
+    from .scanner import full_scan
+
+    is_json = args.json
+    status_cb = _make_status_callback(quiet=is_json)
+    all_reports = []
+
+    # Determine which modules to run
+    modules = {"waf", "errors"}
+    if args.evasion:
+        modules.add("evasion")
+
+    # Resolve --ip targets
+    ip_mode = getattr(args, "ip", None)  # auto, history, or comma-separated IPs
+
+    for target in targets:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        print(f"{CYAN}[*] Tracing infrastructure: {domain}{RESET}", file=sys.stderr)
+
+        # Phase 1: full scan for signals
+        report = full_scan(target, timeout=args.timeout, user_agent=args.user_agent,
+                           proxy=args.proxy, on_status=status_cb,
+                           only_modules=modules, check_evasion=args.evasion,
+                           check_tls=False, scan_subs=False, check_cert=False)
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # Phase 2: build infra chain
+        status_cb("trace", "Analyzing infrastructure chain")
+        sys.stderr.flush()
+        chain = infra_trace.trace_infra(report)
+        report["infra_chain"] = chain
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # Phase 3: traceroute to domain (via CDN path)
+        traceroute = infra_trace.run_traceroute(domain, on_status=status_cb)
+        report["traceroute"] = traceroute
+        sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        # Phase 4: resolve direct IPs and traceroute to them
+        direct_ips = _resolve_trace_ips(ip_mode, domain, report, status_cb)
+        if direct_ips:
+            report["traceroute_direct"] = {}
+            for ip in direct_ips:
+                status_cb("trace", f"Traceroute → {ip} (direct)")
+                sys.stderr.flush()
+                tr_direct = infra_trace.run_traceroute(ip, on_status=status_cb)
+                report["traceroute_direct"][ip] = tr_direct
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+
+        all_reports.append({"target": domain, "report": report})
+
+        if not is_json:
+            _print_trace_report(domain, report)
+
+    if is_json:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _resolve_trace_ips(ip_mode, domain, report, status_cb):
+    """Resolve IPs to traceroute based on --ip flag value."""
+    if not ip_mode:
+        return []
+
+    if ip_mode == "history":
+        from .modules.scan_persistence import ScanPersistence
+        db = ScanPersistence()
+        ip_stats = db.get_ip_stats(domain)
+        db.close()
+        # Skip CDN edges
+        cdn_kw = {"cloudflare", "akamai", "fastly", "cloudfront", "incapsula",
+                   "imperva", "sucuri", "ddos-guard", "stackpath"}
+        ips = [s.ip for s in ip_stats
+               if not any(k in (s.provider or "").lower() for k in cdn_kw)]
+        return ips[:5]
+
+    if ip_mode == "auto":
+        # Use origin candidates from the scan + subdomain leakage
+        from .modules import origin_finder, asn_lookup
+        status_cb("trace", "Discovering origin IPs for traceroute")
+        cdn_ips = {r["ip"] for r in report.get("ips", []) if r.get("classification") == "CDN"}
+        candidates = []
+        if cdn_ips:
+            found = origin_finder.find_origins(domain, cdn_ips=cdn_ips)
+            candidates = [c["ip"] for c in found if not c.get("is_cdn")]
+        # Also try historical DNS
+        historical = origin_finder.fetch_historical_ips(domain)
+        for h in historical:
+            if h["ip"] not in candidates:
+                candidates.append(h["ip"])
+        # ASN-filter: skip CDN edges
+        if candidates:
+            asn_records = asn_lookup.lookup_asn_bulk(candidates[:10])
+            cdn_kw = {"cloudflare", "akamai", "fastly", "cloudfront", "incapsula",
+                       "imperva", "sucuri", "ddos-guard"}
+            candidates = [r["ip"] for r in asn_records
+                          if not any(k in r.get("provider", "").lower() for k in cdn_kw)]
+        return candidates[:5]
+
+    # Explicit comma-separated IPs
+    return [ip.strip() for ip in ip_mode.split(",") if ip.strip()]
+
+
+def _print_trace_report(domain, report):
+    """Print infrastructure trace results."""
+    W = max(len(domain) + 20, 60)
+    print(f"\n{BOLD}{CYAN}╔{'═' * W}╗{RESET}")
+    print(f"{BOLD}{CYAN}║  Infrastructure Trace: {domain}{' ' * max(W - len(domain) - 25, 1)}║{RESET}")
+    print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
+
+    layer_colors = {
+        "cdn": RED, "waf": RED, "cdn/waf": RED,
+        "cache": YELLOW, "loadbalancer": YELLOW,
+        "proxy": YELLOW, "hosting": CYAN,
+        "server": GREEN, "runtime": GREEN,
+        "framework": MAGENTA, "cms": MAGENTA,
+    }
+    layer_labels = {
+        "cdn": "CDN", "waf": "WAF", "cdn/waf": "CDN/WAF",
+        "cache": "CACHE", "loadbalancer": "LB",
+        "proxy": "PROXY", "hosting": "HOSTING",
+        "server": "SERVER", "runtime": "RUNTIME",
+        "framework": "FRAMEWORK", "cms": "CMS",
+    }
+
+    # Traffic path chain
+    chain = report.get("infra_chain", [])
+    if chain:
+        _section("Traffic Path", CYAN)
+        chain_parts = []
+        for node in chain:
+            color = layer_colors.get(node["layer"], DIM)
+            label = layer_labels.get(node["layer"], node["layer"].upper())
+            chain_parts.append(f"{color}{BOLD}{node['name']}{RESET} {DIM}[{label}]{RESET}")
+        _line(f"{'  →  '.join(chain_parts)}")
+
+        # Details per node
+        _section("Details", BLUE)
+        for node in chain:
+            color = layer_colors.get(node["layer"], DIM)
+            label = layer_labels.get(node["layer"], node["layer"].upper())
+            conf_pct = f"{node['confidence']:.0%}"
+            _line(f"{color}{BOLD}{node['name']}{RESET} {DIM}[{label}]{RESET}  conf={BOLD}{conf_pct}{RESET}")
+            for ev in node.get("evidence", [])[:4]:
+                _line(f"   {DIM}{ev}{RESET}")
+    else:
+        _section("Traffic Path", CYAN)
+        _line(f"{DIM}Could not determine infrastructure chain{RESET}")
+
+    # IPs
+    if report.get("ips"):
+        _section("IP Addresses", BLUE)
+        for rec in report["ips"]:
+            cls = rec["classification"]
+            icon = "⚠" if cls == "CDN" else "●"
+            color = RED if cls == "CDN" else GREEN
+            asn_str = f"AS{rec['asn']}" if rec.get("asn") else "AS?"
+            _line(f"{color}{icon}{RESET} {rec['ip']:<16} {color}{asn_str:<10} {rec.get('provider', 'unknown')} [{cls}]{RESET}")
+
+    # CNAME chain
+    if report.get("cnames"):
+        _section("CNAME Chain", BLUE)
+        for c in report["cnames"]:
+            _line(f"→ {c}")
+
+    # Network traceroute
+    tr = report.get("traceroute", {})
+    _print_traceroute_hops(tr, f"Network Traceroute", BLUE)
+
+    if tr.get("needs_root"):
+        print(f"\n    {YELLOW}TCP traceroute needs root. Fix: sudo chmod u+s $(readlink -f $(which traceroute)){RESET}")
+
+    # Direct IP traceroutes (--ip)
+    for ip, tr_direct in report.get("traceroute_direct", {}).items():
+        _print_traceroute_hops(tr_direct, f"Traceroute → {ip} (direct)", YELLOW)
+
+    print()
+
+
+def _print_traceroute_hops(tr, title, color):
+    """Print traceroute hops with compressed filtered runs."""
+    tr_hops = tr.get("hops", [])
+    if tr_hops:
+        methods = ", ".join(tr.get("methods", []))
+        _section(f"{title} ({methods})", color)
+
+        prev_provider = None
+        filtered_run = 0
+        for h in tr_hops:
+            hop_num = h.get("hop", "?")
+            ip = h.get("ip", "*")
+
+            if ip == "*":
+                filtered_run += 1
+                continue
+
+            # Print compressed filtered summary before this real hop
+            if filtered_run > 0:
+                if filtered_run <= 2:
+                    for _ in range(filtered_run):
+                        _line(f"{DIM} ·  {'*':<16}          filtered{RESET}")
+                else:
+                    _line(f"{DIM} ·  {'*':<16}          {filtered_run} hops filtered{RESET}")
+                filtered_run = 0
+
+            rtt = h.get("rtt_ms")
+            provider = h.get("provider", "")
+            asn = h.get("asn", "")
+            cls = h.get("classification", "")
+            rtt_str = f"{rtt:.1f}ms" if rtt is not None else ""
+
+            if _is_private_display(ip):
+                c = DIM
+                label = "local"
+            elif cls == "CDN":
+                c = RED
+                label = "CDN"
+            else:
+                c = GREEN
+                label = ""
+
+            boundary = ""
+            short_provider = provider[:40] if provider else ""
+            if provider and provider != prev_provider and prev_provider is not None:
+                boundary = f" {YELLOW}◄{RESET}"
+            prev_provider = provider
+
+            asn_str = f"AS{asn}" if asn else ""
+            cls_str = f" [{label}]" if label else ""
+            _line(
+                f"{c}{hop_num:>2}  {ip:<16} {rtt_str:>8}  "
+                f"{asn_str:<8} {short_provider}{cls_str}{RESET}{boundary}"
+            )
+
+        # Trailing filtered
+        if filtered_run > 0:
+            _line(f"{DIM} ·  {'*':<16}          {filtered_run} hops filtered{RESET}")
+
+    elif tr.get("methods") is not None and not tr.get("methods"):
+        _section(title, color)
+        if tr.get("error"):
+            _line(f"{DIM}{tr['error']}{RESET}")
+        else:
+            _line(f"{DIM}traceroute failed{RESET}")
+
+
+def _is_private_display(ip):
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return (a == 10 or (a == 172 and 16 <= b <= 31) or
+            (a == 192 and b == 168) or a == 127)
 
 
 def _run_purge_history(targets, args):
@@ -1875,7 +2325,59 @@ def _run_direct_ip(targets, args):
     for target in targets:
         domain = dns_resolver._clean_domain(target)
 
-        if args.direct_ip == "auto":
+        if args.ip == "history":
+            # Load IPs from local database instead of calling APIs
+            from .modules.scan_persistence import ScanPersistence
+            db = ScanPersistence()
+            ip_stats = db.get_ip_stats(domain)
+            db.close()
+
+            if not ip_stats:
+                print(f"{YELLOW}[!] No stored IPs for {domain}. Run a scan first: wtw {domain}{RESET}", file=sys.stderr)
+                continue
+
+            # Skip CDN edge IPs, prioritize bypass-confirmed and high-confidence
+            cdn_waf_keywords = {
+                "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
+                "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
+                "stackpath", "cdn77", "bunny", "gcore", "limelight",
+                "stormwall", "radware", "barracuda", "f5 ", "fortinet",
+                "datadome", "perimeterx", "reblaze", "wallarm",
+                "netlify", "vercel",
+            }
+
+            kept = []
+            skipped = []
+            for s in ip_stats:
+                provider_lower = (s.provider or "").lower()
+                if any(kw in provider_lower for kw in cdn_waf_keywords):
+                    skipped.append(s)
+                else:
+                    kept.append(s)
+
+            if skipped:
+                print(f"{DIM}[*] Skipped {len(skipped)} CDN/WAF edge IP(s) from history{RESET}", file=sys.stderr)
+
+            if not kept:
+                print(f"{YELLOW}[!] All stored IPs for {domain} are CDN/WAF edges — no origin candidates{RESET}", file=sys.stderr)
+                continue
+
+            # Sort: bypass-confirmed first, then by confidence
+            kept.sort(key=lambda s: (-int(s.bypass_confirmed), -s.confidence))
+
+            print(f"{GREEN}[+] Loaded {len(kept)} IP(s) from history for {domain}:{RESET}", file=sys.stderr)
+            for s in kept:
+                bypass_tag = f" {GREEN}[BYPASS]{RESET}" if s.bypass_confirmed else ""
+                print(
+                    f"    {s.ip:<16} conf: {s.confidence:.0%}  "
+                    f"seen {s.times_seen}x  sources: {','.join(s.sources)}{bypass_tag}",
+                    file=sys.stderr,
+                )
+            print(file=sys.stderr)
+
+            ips = [s.ip for s in kept]
+
+        elif args.ip == "auto":
             # Auto-discover origin IPs and test each
             print(f"{CYAN}[*] Auto-discovering origin IPs for {domain}...{RESET}", file=sys.stderr)
 
@@ -2079,7 +2581,7 @@ def _run_direct_ip(targets, args):
             ips = [t["ip"] for t in kept]
         else:
             # Comma-separated IPs
-            ips = [ip.strip() for ip in args.direct_ip.split(",") if ip.strip()]
+            ips = [ip.strip() for ip in args.ip.split(",") if ip.strip()]
 
         # Test each IP
         for ip in ips:
@@ -2440,6 +2942,9 @@ def _run_full(targets, args):
     only_modules = None
     if args.only:
         only_modules = set(m.strip().lower() for m in args.only.split(","))
+        # --only waf implies error page probing (WAFs reveal themselves on blocks)
+        if "waf" in only_modules:
+            only_modules.add("errors")
 
     scan_kwargs = dict(
         timeout=args.timeout, scan_subs=not args.no_subs,
@@ -2458,6 +2963,16 @@ def _run_full(targets, args):
                 if "error" in r and "target" in r:
                     print(f"{RED}[!] Error: {r['target']}: {r['error']}{RESET}", file=sys.stderr)
                 else: _print_report(r)
+        # Persist batch results
+        try:
+            from .modules.scan_persistence import ScanPersistence
+            db = ScanPersistence()
+            for r in reports:
+                if "domain" in r:
+                    db.store_full_scan(r["domain"], r)
+            db.close()
+        except Exception:
+            pass
     else:
         for target in targets:
             print(f"{CYAN}[*] Scanning {target}...{RESET}", file=sys.stderr)
@@ -2466,6 +2981,14 @@ def _run_full(targets, args):
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
                 reports.append(report)
                 if not is_json: _print_report(report)
+                # Persist scan data for cross-session history
+                try:
+                    from .modules.scan_persistence import ScanPersistence
+                    db = ScanPersistence()
+                    db.store_full_scan(report.get("domain", target), report)
+                    db.close()
+                except Exception:
+                    pass
             except Exception as e:
                 sys.stderr.write("\r\033[K"); sys.stderr.flush()
                 print(f"{RED}[!] Error: {target}: {e}{RESET}", file=sys.stderr)

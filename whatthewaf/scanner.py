@@ -146,6 +146,9 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
                 "server": resp["headers"].get("server", resp["headers"].get("Server", "")),
                 "content_type": resp["headers"].get("content-type", ""),
                 "url": resp.get("url", url),
+                "headers": dict(resp["headers"]),
+                "cookies": resp.get("cookies", []),
+                "body": resp.get("body", "")[:50000],
             }
             report["response_hash"] = hashlib.sha256(
                 resp["body"].encode("utf-8", errors="replace")
@@ -156,6 +159,11 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
                 report["waf"] = waf_signatures.detect_waf(
                     resp["headers"], resp["cookies"], resp["body"], resp["status"]
                 )
+
+                # Cross-reference ASN/CDN data: inject detection when signature
+                # engine misses a CDN/WAF already identified by IP/ASN
+                _enrich_waf_from_asn(report, asn_records)
+
                 report["waf_detected"] = any(
                     d["category"] in ("WAF", "CDN/WAF") for d in report["waf"]
                 )
@@ -297,6 +305,49 @@ def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
         time.sleep(delay)
 
     return report
+
+
+# Map ASN provider keywords → WAF signature name + category
+_ASN_TO_WAF = {
+    "cloudflare": ("Cloudflare", "CDN/WAF"),
+    "akamai": ("Akamai", "CDN/WAF"),
+    "incapsula": ("Imperva Incapsula", "WAF"),
+    "imperva": ("Imperva Incapsula", "WAF"),
+    "sucuri": ("Sucuri", "WAF"),
+    "cloudfront": ("AWS CloudFront", "CDN"),
+    "fastly": ("Fastly", "CDN"),
+    "stackpath": ("StackPath", "CDN/WAF"),
+    "ddos-guard": ("DDoS-Guard", "WAF"),
+    "radware": ("Radware AppWall", "WAF"),
+    "barracuda": ("Barracuda WAF", "WAF"),
+    "fortinet": ("FortiWeb", "WAF"),
+    "f5 ": ("F5 BIG-IP", "WAF"),
+    "wallarm": ("Wallarm", "WAF"),
+    "reblaze": ("Reblaze", "WAF"),
+    "perimeterx": ("PerimeterX", "WAF"),
+    "netlify": ("Netlify", "Hosting"),
+    "vercel": ("Vercel", "Hosting"),
+}
+
+
+def _enrich_waf_from_asn(report, asn_records):
+    """Inject WAF/CDN detections from ASN data when signature engine missed them."""
+    if not asn_records:
+        return
+    existing_names = {d["name"] for d in report.get("waf", [])}
+    cdn_records = [r for r in asn_records if r.get("classification") == "CDN"]
+    for rec in cdn_records:
+        provider_lower = rec.get("provider", "").lower()
+        for keyword, (name, category) in _ASN_TO_WAF.items():
+            if keyword in provider_lower and name not in existing_names:
+                report["waf"].insert(0, {
+                    "name": name,
+                    "category": category,
+                    "confidence": 0.85,
+                    "evidence": [f"asn:{rec.get('asn', '?')} ({rec['provider']})"],
+                })
+                existing_names.add(name)
+                break
 
 
 def _is_related_domain(new_domain, original_domain):

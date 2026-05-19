@@ -70,12 +70,25 @@ CREATE TABLE IF NOT EXISTS recon_ips (
     bypass_confirmed INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS scan_detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    confidence REAL DEFAULT 0.5,
+    evidence TEXT,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    times_seen INTEGER DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_domain ON findings(domain);
 CREATE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_domain_fp ON findings(domain, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_recon_ips_domain ON recon_ips(domain);
 CREATE INDEX IF NOT EXISTS idx_recon_ips_domain_ip ON recon_ips(domain, ip);
 CREATE INDEX IF NOT EXISTS idx_scan_runs_domain ON scan_runs(domain);
+CREATE INDEX IF NOT EXISTS idx_scan_detections_domain ON scan_detections(domain);
 """
 
 
@@ -241,6 +254,106 @@ class ScanPersistence:
             )
 
         conn.commit()
+
+    def store_detection(
+        self,
+        domain: str,
+        name: str,
+        category: str,
+        confidence: float = 0.5,
+        evidence: Optional[str] = None,
+    ) -> None:
+        """Store or update a WAF/CDN detection observation."""
+        conn = self._get_conn()
+        now = time.time()
+
+        row = conn.execute(
+            "SELECT id, times_seen, confidence FROM scan_detections WHERE domain = ? AND name = ?",
+            (domain, name),
+        ).fetchone()
+
+        if row:
+            # Keep the highest confidence seen
+            best_conf = max(row["confidence"], confidence)
+            conn.execute(
+                "UPDATE scan_detections SET last_seen = ?, times_seen = times_seen + 1, "
+                "confidence = ?, evidence = COALESCE(?, evidence) WHERE id = ?",
+                (now, best_conf, evidence, row["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO scan_detections (domain, name, category, confidence, evidence, "
+                "first_seen, last_seen, times_seen) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                (domain, name, category, confidence, evidence, now, now),
+            )
+
+        conn.commit()
+
+    def store_full_scan(self, domain: str, report: Dict[str, Any]) -> None:
+        """Persist all recon data from a full scan report."""
+        # Store WAF/CDN detections
+        for det in report.get("waf", []):
+            self.store_detection(
+                domain=domain,
+                name=det.get("name", ""),
+                category=det.get("category", ""),
+                confidence=det.get("confidence", 0.5),
+                evidence=", ".join(det.get("evidence", [])),
+            )
+
+        # Store IPs with ASN data
+        for rec in report.get("ips", []):
+            self.store_recon_ip(
+                domain=domain,
+                ip=rec.get("ip", ""),
+                source="dns",
+                classification=rec.get("classification"),
+                provider=rec.get("provider"),
+            )
+
+        # Store origin candidates
+        for c in report.get("origin_candidates", []):
+            self.store_recon_ip(
+                domain=domain,
+                ip=c.get("ip", ""),
+                source=c.get("source", "origin-finder"),
+                classification=c.get("classification"),
+                provider=c.get("provider"),
+            )
+
+        # Store bypass results
+        for finding in report.get("waf_bypass", {}).get("findings", []):
+            for ip in finding.get("ips", []):
+                self.store_recon_ip(
+                    domain=domain,
+                    ip=ip,
+                    source="bypass",
+                    bypass_confirmed=finding.get("severity") in ("critical", "high"),
+                )
+
+        # Record the scan run
+        self.store_scan(
+            domain=domain,
+            scan_type="full",
+            findings=[],
+            metadata={
+                "cdn_detected": report.get("cdn_detected", False),
+                "waf_detected": report.get("waf_detected", False),
+                "summary": report.get("summary", ""),
+                "http_status": report.get("http", {}).get("status"),
+                "server": report.get("http", {}).get("server"),
+            },
+        )
+
+    def get_detections(self, domain: str) -> List[Dict[str, Any]]:
+        """Get all WAF/CDN detections stored for a domain."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT name, category, confidence, evidence, first_seen, last_seen, times_seen "
+            "FROM scan_detections WHERE domain = ? ORDER BY confidence DESC, times_seen DESC",
+            (domain,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Statistical analysis

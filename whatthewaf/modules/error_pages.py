@@ -278,6 +278,7 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
             "status": status,
             "title": title,
             "server": resp["headers"].get("server", resp["headers"].get("Server", "")),
+            "headers": resp["headers"],
             "waf_hits": [w["name"] for w in waf_hits],
             "tech_hits": [],
             "server_leaks": [f"{name} {ver}".strip() for name, ver, source in server_leaks],
