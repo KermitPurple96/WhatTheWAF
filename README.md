@@ -96,15 +96,15 @@ Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/pr
 
 ### Stealth Usage
 
-Check your current fingerprint, then layer evasion techniques:
+WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP/2, HTTP headers, DNS. Each stealth flag addresses a different layer. Check your fingerprint, apply layers, verify:
 
 ```bash
-# 1. See what you look like now
+# 1. See what you look like
 wtw --whoami
 
 # 2. Apply stealth layers to any scan
 wtw example.com --evasion --proton                      # Route through VPN
-wtw example.com --evasion --tls-rotate                  # Rotate TLS fingerprint per request
+wtw example.com --evasion --tls-rotate                  # Rotate TLS/JA3 fingerprint per request
 wtw example.com --evasion --header-profile chrome       # Browser-accurate header ordering
 wtw example.com --evasion --dot cloudflare              # Encrypted DNS (prevent DNS leaks)
 wtw example.com --waf-scan --proton --auto-retry        # Deep audit with VPN + auto-retry
@@ -116,12 +116,28 @@ wtw example.com --proton --tls-rotate --h2-rotate --header-profile chrome --doh 
 wtw --whoami
 ```
 
-TCP-level evasion (needs sudo):
+**TCP fingerprinting** — WAFs use p0f to detect your OS from TCP parameters (TTL, window size, SACK). If your User-Agent says Chrome/Windows but your TTL is 64 (Linux), you're flagged. Fix this:
 
 ```bash
-sudo wtw --tcp-profile windows         # Change TTL/window to look like Windows
-sudo wtw --tcp-revert                  # Revert to Linux defaults
+sudo wtw --tcp-profile windows         # TTL=128, Windows TCP stack
+wtw --whoami                           # Verify: TTL: 128 → Windows
+# ... run your scans ...
+sudo wtw --tcp-revert                  # Restore Linux defaults
 ```
+
+**Stealth proxy** — intercepts your traffic and modifies it to look like a browser. Use with Burp, Firefox, or any tool:
+
+```bash
+# Terminal 1: start stealth proxy with TLS rotation
+wtw --proxy-mode --tls-rotate --h2-rotate --random-delay 2
+
+# Terminal 2: route scans through it
+wtw example.com --proxy http://127.0.0.1:8888 --evasion
+
+# Or configure Burp/Firefox to use HTTP proxy at 127.0.0.1:8888
+```
+
+`--mitm` is similar but with full HTTPS interception (dynamic per-host certs) for inspecting encrypted traffic.
 
 ## Flags
 
