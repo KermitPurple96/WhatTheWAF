@@ -446,26 +446,25 @@ class MITMProxy:
                 pass
             return
 
-        # Step 4: Wrap remote socket with stealth TLS
+        # Step 4: Wrap remote socket with stealth TLS (HTTP/1.1 only —
+        # MITM reads/modifies HTTP as text, can't handle H2 binary frames)
         remote_tls: Optional[ssl.SSLSocket] = None
-        if self.spoof_tls:
-            try:
-                remote_tls = self._stealth._wrap_tls(remote_sock, host)
-            except Exception as e:
-                self._log(f"Stealth TLS to {host} failed, falling back: {e}")
-                try:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    remote_tls = ctx.wrap_socket(remote_sock, server_hostname=host)
-                except Exception as e2:
-                    self._log(f"Fallback TLS to {host} also failed: {e2}")
-                    return
-        else:
-            ctx = ssl.create_default_context()
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            if self.spoof_tls:
+                try:
+                    ctx.set_ciphers(CHROME_CIPHERS)
+                except ssl.SSLError:
+                    ctx.set_ciphers("DEFAULT")
+            # Force HTTP/1.1 only — no H2 (proxy parses HTTP as text)
+            ctx.set_alpn_protocols(["http/1.1"])
             remote_tls = ctx.wrap_socket(remote_sock, server_hostname=host)
+        except Exception as e:
+            self._log(f"TLS to {host} failed: {e}")
+            return
 
         # Step 5: Relay cleartext HTTP, applying modifications
         try:
