@@ -2905,6 +2905,46 @@ def _run_direct_ip(targets, args):
             # Comma-separated IPs and/or CIDR ranges
             ips = _expand_ip_targets(args.ip)
 
+            # Filter out CDN/WAF edge IPs (Cloudflare, Akamai, etc.)
+            if ips:
+                from .modules import asn_lookup as _asn
+                print(f"{DIM}[*] ASN classification for {len(ips)} IP(s)...{RESET}", file=sys.stderr)
+                asn_info = _asn.lookup_asn_bulk(ips[:500])
+                asn_map = {r["ip"]: r for r in asn_info}
+
+                cdn_waf_keywords = {
+                    "cloudflare", "akamai", "fastly", "cloudfront", "edgecast",
+                    "incapsula", "imperva", "sucuri", "ddos-guard", "qrator",
+                    "stackpath", "cdn77", "bunny", "gcore", "limelight",
+                    "stormwall", "radware", "barracuda", "f5 ", "fortinet",
+                    "datadome", "perimeterx", "reblaze", "wallarm",
+                    "netlify", "vercel",
+                }
+
+                kept = []
+                skipped_cdn = []
+                for ip in ips:
+                    asn = asn_map.get(ip, {})
+                    provider = asn.get("provider", "").lower()
+                    if any(kw in provider for kw in cdn_waf_keywords):
+                        skipped_cdn.append((ip, asn))
+                    else:
+                        kept.append(ip)
+
+                if skipped_cdn:
+                    print(f"{YELLOW}[!] Skipped {len(skipped_cdn)} CDN/WAF edge IP(s):{RESET}", file=sys.stderr)
+                    for ip, asn in skipped_cdn[:5]:
+                        print(f"    {DIM}{ip:<16} {asn.get('provider', '?')}{RESET}", file=sys.stderr)
+                    if len(skipped_cdn) > 5:
+                        print(f"    {DIM}... and {len(skipped_cdn) - 5} more{RESET}", file=sys.stderr)
+
+                if not kept:
+                    print(f"{RED}[!] All IPs are CDN/WAF edges — no origin candidates to test{RESET}", file=sys.stderr)
+                    continue
+
+                sys.stderr.write("\r\033[K"); sys.stderr.flush()
+                ips = kept
+
         # Test each IP
         for ip in ips:
             print(f"{CYAN}[*] Testing {domain} → {ip} (path: {path}){RESET}", file=sys.stderr)
