@@ -23,6 +23,7 @@ wtw example.com --only waf             # WAF detection only
 wtw example.com --trace                # Infrastructure chain + traceroute
 wtw example.com --tls                  # TLS/SSL audit (sslscan-like)
 wtw example.com --ip auto              # Auto-discover + test bypass
+wtw example.com --ip 1.2.3.0/24       # Test CIDR range
 wtw example.com --ip history           # Re-test stored IPs (no APIs)
 wtw example.com --evasion              # Quick WAF evasion recon
 wtw example.com --waf-scan --proton    # Deep WAF audit (use VPN)
@@ -64,12 +65,13 @@ Protocol enumeration (TLS 1.0–1.3), 35+ cipher suite testing (strong/acceptabl
 
 ### `--ip` — WAF Bypass Testing
 
-Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass.
+Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges.
 
 | Mode | What it does |
 |------|-------------|
 | `--ip 1.2.3.4` | Test specific IP(s) |
-| `--ip auto` | Discover origin IPs via OSINT (subdomains, historical DNS, favicon hash, Censys, Shodan, GitHub, VirusTotal) and test all |
+| `--ip 1.2.3.0/24` | Test all 254 IPs in a /24 range |
+| `--ip auto` | Discover origin IPs via OSINT and test all |
 | `--ip history` | Re-test stored IPs from previous scans — no API calls |
 
 ### `--evasion` — Quick WAF Recon (~30 requests)
@@ -92,7 +94,12 @@ Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon h
 
 ### `--whoami` — Your Fingerprint
 
-Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Use before and after applying stealth flags to verify your changes work.
+Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Supports `--proxy` to verify your fingerprint through the MITM proxy.
+
+```bash
+wtw --whoami                                   # Direct fingerprint
+wtw --whoami --proxy http://127.0.0.1:8888     # Through MITM proxy
+```
 
 ## API Keys
 
@@ -130,7 +137,7 @@ shodan_api_key = key1, key2, key3
 # Install (Kali/Debian)
 sudo apt install -y protonvpn-cli
 
-# Sign in (no sudo needed)
+# Sign in
 protonvpn signin <username>
 
 # Connect
@@ -138,7 +145,6 @@ protonvpn connect                      # Fastest server
 protonvpn connect --country NL         # Netherlands
 protonvpn connect --city "Amsterdam"   # Specific city
 protonvpn connect --random             # Random server
-protonvpn connect NL#4                 # Specific server
 
 # Status
 protonvpn status
@@ -149,14 +155,11 @@ wtw --proton-rotate
 
 # Disconnect
 protonvpn disconnect
-
-# Sign out
-protonvpn signout
 ```
 
 ## Stealth Setup (full walkthrough)
 
-WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP/2, HTTP headers, DNS. To be invisible you need to cover all of them. Here's the full setup for a pentest engagement using Burp Suite.
+WAFs fingerprint you at every layer: IP, TCP, TLS, HTTP headers. The MITM proxy intercepts HTTPS traffic, rewrites headers and User-Agent to look like Chrome, and applies stealth TLS. Combined with VPN and TCP fingerprinting, you're invisible.
 
 **Step 1 — Check your current fingerprint:**
 
@@ -169,8 +172,8 @@ wtw --whoami
 **Step 2 — Connect ProtonVPN (change IP + country):**
 
 ```bash
-protonvpn connect --country NL         # Connect to Netherlands
-wtw --proton-check                     # Verify SOCKS proxy is up
+protonvpn connect --country NL
+wtw --proton-check
 ```
 
 **Step 3 — TCP fingerprint (look like Windows, not Linux):**
@@ -179,84 +182,81 @@ wtw --proton-check                     # Verify SOCKS proxy is up
 sudo wtw --tcp-profile windows         # TTL=128, Windows TCP stack
 ```
 
-**Step 4 — Start stealth proxy (covers TLS, HTTP/2, headers, timing):**
+**Step 4 — Start MITM proxy (intercepts HTTPS, rewrites everything):**
 
 ```bash
-wtw --proxy-mode \
-    --proton \
-    --tls-rotate \
-    --h2-rotate \
-    --header-profile chrome \
-    --random-delay 1 \
-    --listen-port 8888
+wtw --mitm --proton --proxy-verbose --random-delay 1 --listen-port 8888
 ```
 
-This proxy intercepts all outgoing traffic and modifies it to look like a real Chrome browser: rotates JA3/JA4 TLS fingerprint, HTTP/2 SETTINGS frames, header ordering, and adds random delays between requests. Traffic exits through ProtonVPN.
+The MITM proxy:
+- Generates per-host TLS certificates signed by a local CA
+- Decrypts HTTPS → rewrites User-Agent, headers, order → re-encrypts with Chrome-like TLS
+- Spoofs `curl/`, `python-httpx`, `sqlmap`, `nuclei`, etc. to Chrome UA
+- Adds Chrome headers: `Sec-Ch-Ua`, `Sec-Fetch-*`, `Accept-Language`, etc.
 
-**Step 5 — Configure Burp Suite to chain through the stealth proxy:**
+**Step 5 — Configure Burp Suite:**
 
 In Burp: `Settings → Network → Connections → Upstream Proxy Servers → Add`:
 - Destination host: `*`
 - Proxy host: `127.0.0.1`
 - Proxy port: `8888`
 
-The traffic flow:
-
 ```
-Browser  →  Burp (8080)  →  wtw proxy (8888)  →  ProtonVPN  →  Internet
-             you see &         stealth               different
-             modify here       modifications          IP/country
+Browser  →  Burp (8080)  →  MITM proxy (8888)  →  ProtonVPN  →  Internet
+             you see &       rewrites headers,       different
+             modify here     spoofs UA/TLS            IP/country
 ```
 
-**Step 6 — Verify your new fingerprint:**
+**Step 6 — Verify:**
 
 ```bash
-wtw --whoami
-# IP: 185.x.x.x | ISP: M247 (NL) | TTL: 128 → Windows | Detected as: VPN
+wtw --whoami --proxy http://127.0.0.1:8888
+
+# Or with curl:
+curl -k -x http://127.0.0.1:8888 https://httpbin.org/headers
+# User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0
+# Sec-Ch-Ua, Sec-Fetch-*, Accept-Language — all injected automatically
 ```
 
-**Step 7 — Run your scans through the chain:**
+**Step 7 — Run scans through the chain:**
 
 ```bash
-# From wtw directly (through stealth proxy)
 wtw target.com --proxy http://127.0.0.1:8888 --evasion
 wtw target.com --proxy http://127.0.0.1:8888 --waf-scan
-
-# Or use Burp's browser — all traffic goes through the stealth chain automatically
 ```
 
-**Step 8 — If blocked, rotate IP without rebuilding the chain:**
+**Step 8 — Rotate IP if blocked:**
 
 ```bash
-wtw --proton-rotate                    # New VPN server, new IP
-wtw --whoami                           # Verify new IP
+wtw --proton-rotate
+wtw --whoami --proxy http://127.0.0.1:8888
 ```
 
-**Step 9 — Clean up when done:**
+**Step 9 — Clean up:**
 
 ```bash
 sudo wtw --tcp-revert                  # Restore Linux TCP defaults
-protonvpn disconnect                   # Disconnect VPN
-# Ctrl+C the stealth proxy
+protonvpn disconnect
+# Ctrl+C the MITM proxy
 ```
 
 **Layer summary:**
 
-| Layer | What changes | Flag |
-|-------|-------------|------|
-| IP | Different IP/country | `--proton` |
+| Layer | What changes | How |
+|-------|-------------|-----|
+| IP | Different IP/country | `--proton` on MITM proxy |
 | TCP | TTL=128, Windows TCP stack | `sudo --tcp-profile windows` |
-| DNS | Encrypted, no ISP snooping | `--doh cloudflare` |
-| TLS | Chrome JA3/JA4, rotates per request | `--tls-rotate` |
-| HTTP/2 | Chrome SETTINGS frames | `--h2-rotate` |
-| HTTP | Chrome header order, real UA | `--header-profile chrome` |
+| TLS | Chrome cipher suites, HTTP/1.1 ALPN | MITM proxy auto |
+| HTTP | Chrome UA, Sec-Ch-Ua, Sec-Fetch-*, header order | MITM proxy auto |
 | Timing | Random delays between requests | `--random-delay 1` |
 
-Without Burp, the stealth flags work the same — just combine them with any scan:
+Without Burp, stealth flags work directly on scans:
 
 ```bash
-wtw target.com --proton --tls-rotate --h2-rotate --header-profile chrome --doh cloudflare --evasion
+wtw target.com --proton --tls-rotate --header-profile chrome --doh cloudflare --evasion
 ```
+
+> **CA trust:** The MITM proxy generates a CA at `/tmp/whatthewaf_ca/ca.crt`. For curl use `-k` (skip verify) or `--cacert /tmp/whatthewaf_ca/ca.crt`. For Burp, import the CA in `Settings → Network → TLS`.
 
 ## Flags
 
@@ -276,7 +276,7 @@ targets                  Domain(s), IP(s), or @file.txt
 --waf-scan-layers L      Specific layers only
 
 # Bypass
---ip IP                  Test IP(s), 'auto', or 'history'
+--ip IP                  IP(s), CIDR range (1.2.3.0/24), 'auto', or 'history'
 --path PATH              Path for --ip (default: /)
 --recon                  Full OSINT recon
 
@@ -296,10 +296,18 @@ targets                  Domain(s), IP(s), or @file.txt
 --no-persist             Skip storing results
 
 # Fingerprint
---whoami                 Show your current fingerprint (IP, TLS, headers, TCP)
---stealth-status         Show status of all evasion capabilities
+--whoami                 Your current fingerprint (IP, TLS, headers, TCP)
+--stealth-status         Status of all evasion capabilities
 
-# Stealth (combine with any scan)
+# MITM Proxy (full HTTPS interception + header/UA/TLS spoofing)
+--mitm                   Start MITM proxy
+--listen-port PORT       Port (default: 8888)
+--no-spoof-ua            Don't replace User-Agent
+--no-spoof-tls           Don't modify TLS fingerprint
+--proxy-verbose          Log all requests
+--random-delay SECS      Random delay between requests
+
+# Stealth (combine with any scan or MITM proxy)
 --proton                 Route through ProtonVPN SOCKS
 --proxy URL              HTTP/SOCKS proxy
 --tor                    Tor IP rotation
@@ -310,13 +318,11 @@ targets                  Domain(s), IP(s), or @file.txt
 --doh [PROVIDER]         DNS-over-HTTPS (cloudflare/google/quad9/adguard)
 --auto-retry             Auto-retry on WAF blocks
 
-# Stealth (standalone tools)
+# Stealth (standalone)
 --proton-check           Check VPN status
 --proton-rotate          Rotate VPN IP
---proxy-chain LIST       Test proxy chain effectiveness against WAF
---cf-inject              Test Cloudflare header spoofing bypass
---proxy-mode             Start stealth proxy (JA3 evasion + browser headers)
---mitm                   Start MITM proxy (HTTPS interception)
+--proxy-chain LIST       Test proxy chain against WAF
+--cf-inject              Test Cloudflare header spoofing
 
 # Protocol probing
 --h3                     HTTP/3 QUIC probe
@@ -339,4 +345,3 @@ targets                  Domain(s), IP(s), or @file.txt
 --delay SECS             Delay between targets
 --workers N              Concurrent workers
 ```
-

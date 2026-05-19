@@ -45,7 +45,7 @@ def main():
 
   # stealth
   whatthewaf example.com --tor --tls-rotate --source-port rotating
-  whatthewaf --proxy-mode --proton --tls-rotate --h2-rotate
+  whatthewaf --mitm --proton --listen-port 8888
   cat subs.txt | whatthewaf --stdin -m origins""",
     )
     parser.add_argument("targets", nargs="*", help="Domain(s), IP(s), or @file.txt")
@@ -79,13 +79,13 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("--proxy-mode", action="store_true",
-                        help="Start as stealth proxy (JA3 evasion + browser headers + ProtonVPN)")
+                        help="(deprecated, use --mitm) Transparent tunnel proxy")
     parser.add_argument("--listen-port", type=int, default=8888,
-                        help="Port for proxy mode (default: 8888)")
+                        help="Port for --mitm proxy (default: 8888)")
     parser.add_argument("--no-spoof-ua", action="store_true",
-                        help="Proxy mode: don't replace User-Agent")
+                        help="MITM proxy: don't replace User-Agent")
     parser.add_argument("--no-spoof-tls", action="store_true",
-                        help="Proxy mode: don't modify TLS fingerprint")
+                        help="MITM proxy: don't modify TLS fingerprint")
     parser.add_argument("--proxy-verbose", action="store_true",
                         help="Proxy mode: log all requests")
     parser.add_argument("--random-delay", type=float, default=0,
@@ -547,7 +547,7 @@ def _run_stealth_status():
 
     print(f"\n{'=' * 60}")
     print(f"  {BOLD}Full stealth command:{RESET}")
-    print(f"    {CYAN}whatthewaf --proxy-mode --proton --tls-rotate --source-port rotating --random-delay 2{RESET}")
+    print(f"    {CYAN}whatthewaf --mitm --proton --random-delay 2 --listen-port 8888{RESET}")
     print(f"    or {CYAN}whatthewaf --mitm --tor --tls-rotate --h2-rotate{RESET}")
     print(f"    + {CYAN}whatthewaf --tcp-profile windows{RESET} (in another terminal)")
     print()
