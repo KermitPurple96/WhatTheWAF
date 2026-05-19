@@ -300,15 +300,37 @@ def main():
         _run_full(targets, args)
 
 
+def _http_get(url, proxy=None, timeout=10):
+    """HTTP GET that works through HTTP CONNECT proxies (uses curl when proxy set)."""
+    import httpx
+    import subprocess
+    import json as _json
+
+    if proxy:
+        # Python HTTP libs have issues with HTTP proxies for HTTPS (SSL to proxy instead of CONNECT)
+        # curl handles this correctly, so we use it when a proxy is set
+        try:
+            cmd = ["curl", "-s", "-x", proxy, "-k", "--max-time", str(timeout), url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+            if result.returncode == 0 and result.stdout.strip():
+                class CurlResponse:
+                    status_code = 200
+                    text = result.stdout
+                    def json(self):
+                        return _json.loads(self.text)
+                return CurlResponse()
+        except Exception:
+            pass
+        return None
+
+    resp = httpx.get(url, timeout=timeout, verify=False)
+    return resp
+
+
 def _run_whoami(proxy=None):
     """Show your current fingerprint — what servers see when you connect."""
     import ssl
     import socket
-    import httpx
-
-    client_kwargs = {"timeout": 10, "verify": False}
-    if proxy:
-        client_kwargs["proxy"] = proxy
 
     print(f"\n{BOLD}Your Fingerprint{RESET}")
     if proxy:
@@ -318,9 +340,8 @@ def _run_whoami(proxy=None):
     # 1. Public IP + geolocation via ipquery.io
     print(f"\n  {BOLD}Network{RESET}")
     try:
-        with httpx.Client(**client_kwargs) as client:
-            resp = client.get("https://api.ipquery.io/?format=json")
-        if resp.status_code == 200:
+        resp = _http_get("https://api.ipquery.io/?format=json", proxy=proxy)
+        if resp and resp.status_code == 200:
             data = resp.json()
             ip = data.get("ip", "?")
             isp = data.get("isp", {})
@@ -378,9 +399,8 @@ def _run_whoami(proxy=None):
     # 3. HTTP fingerprint (through proxy if set — shows what the target sees)
     print(f"\n  {BOLD}HTTP Fingerprint{RESET}")
     try:
-        with httpx.Client(**client_kwargs) as client:
-            resp = client.get("https://httpbin.org/headers")
-        if resp.status_code == 200:
+        resp = _http_get("https://httpbin.org/headers", proxy=proxy)
+        if resp and resp.status_code == 200:
             headers = resp.json().get("headers", {})
             ua = headers.get("User-Agent", "?")
             print(f"    User-Agent:  {DIM}{ua[:70]}{RESET}")
