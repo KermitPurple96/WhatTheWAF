@@ -127,34 +127,32 @@ shodan_api_key = key1, key2, key3
 ## ProtonVPN Setup
 
 ```bash
-# Install (pip v2 CLI — don't use apt, it conflicts)
-pip install protonvpn-cli
+# Install (Kali/Debian)
+sudo apt install -y protonvpn-cli
 
-# If you have the apt version installed, remove it first:
-sudo apt remove -y proton-vpn-cli 2>/dev/null
-
-# First time setup (needs sudo — use full path if sudo doesn't find it)
-sudo protonvpn init                    # Enter credentials + plan
+# Sign in (no sudo needed)
+protonvpn signin <username>
 
 # Connect
-sudo protonvpn connect --cc NL         # Netherlands
-sudo protonvpn connect --fastest       # Fastest server
-sudo protonvpn connect --random        # Random server
+protonvpn connect                      # Fastest server
+protonvpn connect --country NL         # Netherlands
+protonvpn connect --city "Amsterdam"   # Specific city
+protonvpn connect --random             # Random server
+protonvpn connect NL#4                 # Specific server
 
-# Check status
-sudo protonvpn status
+# Status
+protonvpn status
 wtw --proton-check                     # Verify wtw can use it
 
 # Rotate IP
 wtw --proton-rotate
 
 # Disconnect
-sudo protonvpn disconnect
+protonvpn disconnect
+
+# Sign out
+protonvpn signout
 ```
-
-> If `sudo protonvpn` gives errors, sudo may find a different binary. Use the full path: `sudo $(which protonvpn) connect --cc NL`
-
-For GUI: enable SOCKS5 proxy on port 1080 in ProtonVPN settings, then use `--proton`.
 
 ## Stealth Setup (full walkthrough)
 
@@ -171,7 +169,7 @@ wtw --whoami
 **Step 2 — Connect ProtonVPN (change IP + country):**
 
 ```bash
-sudo protonvpn connect --cc NL         # Connect to Netherlands (needs sudo)
+protonvpn connect --country NL         # Connect to Netherlands
 wtw --proton-check                     # Verify SOCKS proxy is up
 ```
 
