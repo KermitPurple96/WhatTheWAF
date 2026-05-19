@@ -38,15 +38,13 @@ wtw example.com --json -o report.json  # JSON output
 
 ### `--only waf` — WAF/CDN Detection
 
-90+ WAF/CDN signatures matched against HTTP headers, cookies, body, and error pages. When ASN identifies a CDN/WAF that headers don't reveal (e.g. Cloudflare with `server: nginx`), it's auto-detected. Error page probing (15 probes including SQLi, XSS, path traversal triggers) is included automatically.
+90+ WAF/CDN signatures matched against HTTP headers, cookies, body, and error pages. When ASN identifies a CDN/WAF that headers don't reveal (e.g. Cloudflare with `server: nginx`), it's auto-detected. Error page probing (15 probes including SQLi, XSS, path traversal triggers) is included automatically. Also detects WAF **tier/plan** (Cloudflare Free/Pro/Enterprise, Akamai Standard/Bot Manager, etc.) from cookies and behavioral signals.
 
 Example against nike.com:
 ```
 WAF Detected: Akamai, AWS CloudFront
 WAF Active:   YES — blocking 5/5 attack payloads
-    BLOCKED [301] SQL injection probe (AWS CloudFront)
-    BLOCKED [301] XSS probe (AWS CloudFront)
-    BLOCKED [301] Path traversal probe (AWS CloudFront)
+Plan:         Akamai Standard (conf=40%)
 ```
 
 ### `--trace` — Infrastructure Trace
@@ -59,7 +57,12 @@ AWS CloudFront [CDN]  →  Akamai [CDN/WAF]  →  unified-edge-router [PROXY]  �
 
 Fingerprints 11 layers: CDN/WAF, cache (Varnish, Squid), load balancers (HAProxy, F5, ALB), proxies (nginx, Envoy), hosting (SiteGround, WP Engine, Heroku), web servers (Apache, IIS), runtimes (PHP, Java, Node.js, Python), frameworks (Django, Laravel, Rails, Next.js), and CMS (WordPress, Drupal, Magento).
 
-Network traceroute (ICMP + TCP:443) with ASN classification shows the physical path with `◄` markers at network boundaries. TCP traceroute needs root — fix with `sudo chmod u+s $(readlink -f $(which traceroute))`.
+Also runs:
+- **Network traceroute** (ICMP + TCP:443) with ASN classification per hop. TCP needs root — fix with `sudo chmod u+s $(readlink -f $(which traceroute))`
+- **Subdomain takeover detection** — checks 50+ subdomains for dangling CNAMEs against 30+ provider fingerprints (S3, GitHub Pages, Heroku, Azure, Fastly, Netlify, etc.)
+- **Cache poisoning tests** — probes unkeyed header injection (`X-Forwarded-Host`, `X-Original-URL`) and cache deception (path confusion with static extensions)
+
+Example: found `X-Forwarded-Host` cache poisoning on nike.com (cacheable `max-age=699`)
 
 Combinable with other flags:
 
@@ -83,7 +86,9 @@ Vulnerabilities:  None found
 
 ### `--ip` — WAF Bypass Testing
 
-Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges. All IPs are ASN-classified before testing — CDN/WAF edge IPs (Cloudflare, Akamai, etc.) are automatically skipped to prevent false positives.
+Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges. CDN/WAF edge IPs are automatically skipped. Each origin IP also gets:
+- **Alternative port scan** — 12 common ports (8080, 8443, 4443, 9443, cPanel, Webmin, Plesk)
+- **Cloud metadata probe** — checks `169.254.169.254` on AWS/GCP/Azure/DO IPs for exposed metadata (IMDSv1)
 
 | Mode | What it does |
 |------|-------------|
