@@ -223,7 +223,7 @@ def main():
         _run_stealth_status()
         return
     if args.whoami:
-        _run_whoami()
+        _run_whoami(proxy=args.proxy)
         return
     if args.install_curl_impersonate:
         _run_install_curl_impersonate()
@@ -300,19 +300,26 @@ def main():
         _run_full(targets, args)
 
 
-def _run_whoami():
+def _run_whoami(proxy=None):
     """Show your current fingerprint — what servers see when you connect."""
     import ssl
     import socket
     import httpx
 
+    client_kwargs = {"timeout": 10, "verify": False}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
     print(f"\n{BOLD}Your Fingerprint{RESET}")
+    if proxy:
+        print(f"  {DIM}(via proxy: {proxy}){RESET}")
     print("=" * 60)
 
     # 1. Public IP + geolocation via ipquery.io
     print(f"\n  {BOLD}Network{RESET}")
     try:
-        resp = httpx.get("https://api.ipquery.io/?format=json", timeout=10, verify=False)
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.get("https://api.ipquery.io/?format=json")
         if resp.status_code == 200:
             data = resp.json()
             ip = data.get("ip", "?")
@@ -344,7 +351,7 @@ def _run_whoami():
     except Exception as e:
         print(f"    {RED}Could not determine IP: {e}{RESET}")
 
-    # 2. TLS fingerprint
+    # 2. TLS fingerprint (direct — not through proxy, to show your raw TLS)
     print(f"\n  {BOLD}TLS Fingerprint{RESET}")
     try:
         ctx = ssl.create_default_context()
@@ -368,10 +375,11 @@ def _run_whoami():
     except Exception as e:
         print(f"    {RED}Error: {e}{RESET}")
 
-    # 3. HTTP fingerprint
+    # 3. HTTP fingerprint (through proxy if set — shows what the target sees)
     print(f"\n  {BOLD}HTTP Fingerprint{RESET}")
     try:
-        resp = httpx.get("https://httpbin.org/headers", timeout=10, verify=False)
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.get("https://httpbin.org/headers")
         if resp.status_code == 200:
             headers = resp.json().get("headers", {})
             ua = headers.get("User-Agent", "?")
@@ -379,7 +387,6 @@ def _run_whoami():
             accept = headers.get("Accept", "")
             if accept:
                 print(f"    Accept:      {DIM}{accept[:60]}{RESET}")
-            # Count headers — browsers send ~10, tools send fewer
             hdr_count = len(headers)
             print(f"    Headers:     {hdr_count} sent")
     except Exception:
