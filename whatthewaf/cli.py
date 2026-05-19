@@ -45,6 +45,39 @@ _VALUE_FLAGS = {
 }
 
 
+def _list_profiles():
+    """List all available profiles with their settings."""
+    import configparser
+
+    if not os.path.isfile(_PROFILES_PATH):
+        print(f"\n  {YELLOW}No profiles configured.{RESET}")
+        print(f"  Create: {CYAN}{_PROFILES_PATH}{RESET}")
+        return
+
+    cp = configparser.ConfigParser()
+    cp.read(_PROFILES_PATH)
+
+    if not cp.sections():
+        print(f"\n  {YELLOW}No profiles found in {_PROFILES_PATH}{RESET}")
+        return
+
+    print(f"\n{BOLD}Available Profiles{RESET}")
+    print(f"  {DIM}{_PROFILES_PATH}{RESET}\n")
+
+    for section in cp.sections():
+        items = dict(cp.items(section))
+        flags = []
+        for k, v in items.items():
+            k_flag = k.replace("_", "-")
+            if v.lower() in ("true", "yes", "1", "on"):
+                flags.append(f"--{k_flag}")
+            else:
+                flags.append(f"--{k_flag} {v}")
+        print(f"  {GREEN}{BOLD}{section}{RESET}")
+        print(f"    {DIM}{' '.join(flags)}{RESET}")
+    print(f"\n  Usage: {CYAN}wtw example.com --profile <name>{RESET}\n")
+
+
 def _apply_profile(args):
     """Load a profile from config file and apply as defaults (CLI flags override)."""
     import configparser
@@ -265,6 +298,9 @@ def main():
 
     # Load profile if specified (profile values are defaults, CLI flags override)
     if args.profile:
+        if args.profile in ("?", "list", "help"):
+            _list_profiles()
+            return
         _apply_profile(args)
 
     import urllib3
