@@ -215,22 +215,9 @@ class StealthProxy:
         # Tell client the tunnel is established
         client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
-        # Now wrap the remote socket with our stealth TLS
-        if self.spoof_tls:
-            try:
-                remote_sock = self._wrap_tls(remote_sock, host)
-            except Exception as e:
-                self._log(f"TLS handshake failed for {host}: {e}")
-                # Fall back to plain TLS
-                try:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    remote_sock = ctx.wrap_socket(remote_sock, server_hostname=host)
-                except Exception:
-                    return
-
-        # Relay data between client and remote
+        # CONNECT tunnel: relay raw bytes transparently.
+        # The client does its own TLS handshake through the tunnel.
+        # We don't wrap TLS here — that's what --mitm mode is for.
         self._relay(client_sock, remote_sock, host)
 
     def _handle_http(self, client_sock, raw):
