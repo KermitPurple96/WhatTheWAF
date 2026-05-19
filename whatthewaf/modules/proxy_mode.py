@@ -376,9 +376,10 @@ class StealthProxy:
             if self.spoof_ua and key_lower == "user-agent":
                 # Replace tool UAs with Chrome
                 val_lower = val.lower()
-                tool_indicators = ["java/", "python", "sqlmap", "nikto", "nmap",
-                                   "masscan", "zgrab", "gobuster", "ffuf", "dirbuster",
-                                   "wfuzz", "burp", "zaproxy", "nuclei"]
+                tool_indicators = ["java/", "python", "curl/", "wget/", "httpx",
+                                   "sqlmap", "nikto", "nmap", "masscan", "zgrab",
+                                   "gobuster", "ffuf", "dirbuster", "wfuzz",
+                                   "burp", "zaproxy", "nuclei", "httpclient"]
                 if any(t in val_lower for t in tool_indicators) or not val:
                     val = CHROME_UA
 
