@@ -228,128 +228,179 @@ def _get_cache_indicators(resp):
 def test_cache_poisoning(url, timeout=5):
     """Test for cache poisoning and cache deception vulnerabilities.
 
-    Methodology:
-    1. Baseline: fetch with cache buster to get clean response
-    2. Header poisoning: inject each header, check if reflected or response changes
-    3. Verify cacheability: check Cache-Control, X-Cache, Age headers
-    4. Confirm cached: re-request WITHOUT the header, check if poison persists
-    5. Cache deception: path confusion with static extensions + variants
+    Only reports when there's concrete evidence of exploitability:
+    - CRITICAL: injected value persists in cache (verified with clean re-request)
+    - HIGH: injected value reflected in response body in an exploitable context
+      (links, script src, redirects, meta tags) AND response is cacheable
+    - MEDIUM: cache deception confirmed (static-path serves dynamic content + cached)
+
+    Does NOT report mere "response differs" — that's usually dynamic tokens/nonces.
 
     Returns list of findings.
     """
     import random
     import string
+    import time
 
     findings = []
-    cache_buster = "".join(random.choices(string.ascii_lowercase, k=8))
+    cb = lambda: "".join(random.choices(string.ascii_lowercase, k=8))
 
     # 1. Baseline with cache buster (guaranteed MISS)
     try:
-        baseline_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={cache_buster}"
+        baseline_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={cb()}"
         baseline = httpx.get(baseline_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA})
-        baseline_body = baseline.text[:10000]
-        baseline_hash = hashlib.sha256(baseline_body.encode()).hexdigest()[:16]
-        baseline_cache = _get_cache_indicators(baseline)
+        baseline_body = baseline.text[:20000]
     except Exception:
         return findings
 
-    # 2. Test unkeyed header injection
+    # 2. Test header reflection — only report if value appears in exploitable context
     for header_name, header_value in POISON_HEADERS:
         try:
-            # Request with poison header + new cache buster
-            cb = "".join(random.choices(string.ascii_lowercase, k=8))
-            poison_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={cb}"
+            buster = cb()
+            poison_url = f"{url}{'&' if '?' in url else '?'}wtw_cb={buster}"
             resp = httpx.get(poison_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA, header_name: header_value})
-            body = resp.text[:10000]
+            body = resp.text[:20000]
             resp_cache = _get_cache_indicators(resp)
 
-            # Check if our injected value is reflected in the response body
-            if header_value in body and header_value not in baseline_body:
-                # HIGH: value reflected — if cached, attacker controls page content
-                desc = f"{header_name}: {header_value} reflected in response body"
-                if resp_cache["is_cacheable"]:
-                    desc += f" (cacheable: {resp_cache['cache_control'] or 'no cache-control'})"
+            # Value must be reflected AND not in baseline
+            if header_value not in body or header_value in baseline_body:
+                continue
 
-                    # Confirm: re-request WITHOUT the header, same cache buster
-                    # If the response still contains our value → it was cached
-                    try:
-                        verify = httpx.get(poison_url, timeout=timeout, verify=False,
-                                           headers={"User-Agent": DEFAULT_UA})
-                        if header_value in verify.text[:10000]:
-                            desc += " — CONFIRMED CACHED (poison persists without header)"
-                            severity = "critical"
-                        else:
-                            severity = "high"
-                    except Exception:
-                        severity = "high"
-                else:
-                    severity = "medium"  # Reflected but not cacheable
+            # Check if reflected in an exploitable context (not just any random place)
+            exploitable = False
+            context = ""
+            body_lower = body.lower()
+            val_lower = header_value.lower()
 
-                findings.append({
-                    "type": "cache_poisoning",
-                    "title": f"Header reflected: {header_name}",
-                    "severity": severity,
-                    "description": desc,
-                    "header": header_name,
-                    "value": header_value,
-                })
-                continue  # Don't double-report
+            # In href, src, action attributes
+            if re.search(rf'(?:href|src|action)\s*=\s*["\'][^"\']*{re.escape(val_lower)}', body_lower):
+                exploitable = True
+                context = "reflected in href/src/action attribute"
 
-            # Check if response differs (header influences server behavior)
-            resp_hash = hashlib.sha256(body.encode()).hexdigest()[:16]
-            if resp_hash != baseline_hash and resp.status_code == baseline.status_code:
-                if resp_cache["is_cacheable"]:
+            # In a <script> tag
+            elif re.search(rf'<script[^>]*>[^<]*{re.escape(val_lower)}', body_lower):
+                exploitable = True
+                context = "reflected inside <script> tag"
+
+            # In a <meta> tag (redirect, CSP, etc.)
+            elif re.search(rf'<meta[^>]*{re.escape(val_lower)}', body_lower):
+                exploitable = True
+                context = "reflected in <meta> tag"
+
+            # In Location header (redirect)
+            location = resp.headers.get("location", "")
+            if header_value in location:
+                exploitable = True
+                context = f"reflected in Location header: {location[:80]}"
+
+            # In Set-Cookie header
+            set_cookie = resp.headers.get("set-cookie", "")
+            if header_value in set_cookie:
+                exploitable = True
+                context = "reflected in Set-Cookie header"
+
+            if not exploitable:
+                continue
+
+            # We have exploitable reflection — now check cacheability
+            if not resp_cache["is_cacheable"]:
+                continue  # Not cacheable = not poisonable
+
+            # Confirm: re-request WITHOUT the header, same cache buster
+            # Wait a moment for cache to populate
+            time.sleep(0.5)
+            try:
+                verify = httpx.get(poison_url, timeout=timeout, verify=False,
+                                   headers={"User-Agent": DEFAULT_UA})
+                if header_value in verify.text[:20000]:
+                    # CRITICAL: poison persists in cache
                     findings.append({
                         "type": "cache_poisoning",
-                        "title": f"Response varies on unkeyed header: {header_name}",
-                        "severity": "medium",
-                        "description": f"{header_name} changes response (cacheable: {resp_cache['cache_control'] or 'no cache-control'})",
+                        "title": f"CONFIRMED cache poisoning via {header_name}",
+                        "severity": "critical",
+                        "description": f"{header_name}: {header_value} {context} — persists in cache without header",
                         "header": header_name,
                     })
+                else:
+                    # HIGH: reflected in exploitable context + cacheable but didn't persist
+                    findings.append({
+                        "type": "cache_poisoning",
+                        "title": f"Exploitable reflection via {header_name}",
+                        "severity": "high",
+                        "description": f"{header_name}: {header_value} {context} (cacheable: {resp_cache['cache_control']})",
+                        "header": header_name,
+                    })
+            except Exception:
+                findings.append({
+                    "type": "cache_poisoning",
+                    "title": f"Exploitable reflection via {header_name}",
+                    "severity": "high",
+                    "description": f"{header_name}: {header_value} {context}",
+                    "header": header_name,
+                })
+
         except Exception:
             pass
 
-    # 3. Test cache deception (path confusion)
+    # 3. Cache deception — path confusion
+    # Only report if: static-looking path serves the SAME dynamic content AND is actually cached
     parsed = httpx.URL(url)
     base_path = str(parsed.path).rstrip("/") or ""
+
+    # Get a fresh baseline for path comparison (no cache buster)
+    try:
+        path_baseline = httpx.get(url, timeout=timeout, verify=False,
+                                   headers={"User-Agent": DEFAULT_UA})
+        path_baseline_body = path_baseline.text[:20000]
+        # Strip dynamic tokens (CSRF, nonces) for comparison
+        path_baseline_stripped = re.sub(r'[a-f0-9]{32,}|csrf[^"]*"[^"]*"', '', path_baseline_body)
+        path_baseline_hash = hashlib.sha256(path_baseline_stripped.encode()).hexdigest()[:16]
+    except Exception:
+        return findings
 
     for suffix in CACHE_DECEPTION_PATHS:
         deception_url = f"{parsed.scheme}://{parsed.host}{base_path}{suffix}"
         try:
             resp = httpx.get(deception_url, timeout=timeout, verify=False,
                              headers={"User-Agent": DEFAULT_UA}, follow_redirects=True)
-            if resp.status_code == 200:
-                resp_hash = hashlib.sha256(resp.text[:10000].encode()).hexdigest()[:16]
-                resp_cache = _get_cache_indicators(resp)
+            if resp.status_code != 200:
+                continue
 
-                # Same content as original page served under a static-looking path
-                if resp_hash == baseline_hash:
-                    severity = "high" if resp_cache["is_cached"] else "medium"
-                    cache_info = resp_cache["cf_cache_status"] or resp_cache["x_cache"] or resp_cache["cache_control"] or "unknown"
-                    findings.append({
-                        "type": "cache_deception",
-                        "title": f"Path confusion: {suffix}",
-                        "severity": severity,
-                        "description": f"{base_path}{suffix} returns same content as {base_path}/ (cache: {cache_info})",
-                        "path": suffix,
-                        "cached": resp_cache["is_cached"],
-                    })
+            resp_body = resp.text[:20000]
+            resp_stripped = re.sub(r'[a-f0-9]{32,}|csrf[^"]*"[^"]*"', '', resp_body)
+            resp_hash = hashlib.sha256(resp_stripped.encode()).hexdigest()[:16]
+            resp_cache = _get_cache_indicators(resp)
+
+            # Must: same content AND actually cached or cacheable with static content-type
+            if resp_hash != path_baseline_hash:
+                continue
+
+            content_type = resp.headers.get("content-type", "").lower()
+            is_served_as_static = any(t in content_type for t in ("text/css", "javascript", "image/", "font/"))
+
+            if resp_cache["is_cached"]:
+                # CONFIRMED: CDN cached dynamic content under static path
+                findings.append({
+                    "type": "cache_deception",
+                    "title": f"Cache deception: {suffix}",
+                    "severity": "high",
+                    "description": f"{base_path}{suffix} serves dynamic content and is CACHED ({resp_cache['x_cache'] or resp_cache['cf_cache_status']})",
+                    "path": suffix,
+                })
+            elif resp_cache["is_cacheable"] and is_served_as_static:
+                findings.append({
+                    "type": "cache_deception",
+                    "title": f"Cache deception risk: {suffix}",
+                    "severity": "medium",
+                    "description": f"{base_path}{suffix} serves dynamic content as {content_type} (cacheable)",
+                    "path": suffix,
+                })
         except Exception:
             pass
 
-    # Deduplicate (same header shouldn't appear twice)
-    seen = set()
-    deduped = []
-    for f in findings:
-        key = f.get("header", f.get("path", f["title"]))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(f)
-
-    deduped.sort(key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x["severity"], 9))
-    return deduped
+    return findings
 
 
 # ──────────────────────────────────────────────────────────────
