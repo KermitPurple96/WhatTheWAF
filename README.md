@@ -251,20 +251,22 @@ protonvpn disconnect
 | HTTP | Chrome UA, Sec-Ch-Ua, Sec-Fetch-*, header order | MITM proxy auto |
 | Timing | Random delays between requests | `--random-delay 1` |
 
-Without Burp, stealth flags work directly on scans:
+Without Burp, use a profile to apply all stealth layers at once:
 
 ```bash
-wtw target.com --proton --tls-rotate --header-profile chrome --doh cloudflare --evasion
+wtw target.com --profile chrome-vpn --evasion
+wtw target.com --profile chrome-vpn --waf-scan
+wtw target.com --profile paranoid --trace
 ```
 
 > **CA trust:** The MITM proxy generates a CA at `/tmp/whatthewaf_ca/ca.crt`. For curl use `-k` (skip verify) or `--cacert /tmp/whatthewaf_ca/ca.crt`. For Burp, import the CA in `Settings → Network → TLS`.
 
 ## Profiles
 
-Save flag combinations as named profiles in `~/.config/whatthewaf/profiles.conf` to avoid typing long commands:
+Profiles define your identity/fingerprint — not what to scan. Save them in `~/.config/whatthewaf/profiles.conf`:
 
 ```ini
-[stealth]
+[chrome-vpn]
 proton = true
 header_profile = chrome
 tls_rotate = true
@@ -272,30 +274,32 @@ h2_rotate = true
 doh = cloudflare
 random_delay = 1
 
-[stealth-mitm]
-mitm = true
-proton = true
-proxy_verbose = true
-random_delay = 1
-listen_port = 8888
+[low-profile]
+doh = cloudflare
+random_delay = 2
+timeout = 15
 
-[aggressive]
-waf_scan = true
+[paranoid]
 proton = true
-auto_retry = true
+tls_rotate = true
+h2_rotate = true
 header_profile = chrome
+doh = cloudflare
+random_delay = 3
+auto_retry = true
 ```
+
+Combine a profile with any action:
 
 ```bash
-wtw example.com --profile stealth          # Apply stealth settings
-wtw example.com --profile aggressive       # Deep WAF audit + VPN
-wtw --profile stealth-mitm                 # Start MITM proxy with presets
-
-# CLI flags override profile values:
-wtw example.com --profile stealth --timeout 20
+wtw example.com --profile chrome-vpn --only waf        # WAF detection as Chrome via VPN
+wtw example.com --profile chrome-vpn --waf-scan        # Deep audit as Chrome via VPN
+wtw example.com --profile chrome-vpn --trace            # Trace as Chrome via VPN
+wtw example.com --profile paranoid --evasion            # Evasion with max stealth
+wtw --profile ?                                         # List available profiles
 ```
 
-You can also pass a file path: `wtw example.com --profile /path/to/custom.conf`
+CLI flags always override profile values. You can also pass a file path: `--profile /path/to/custom.conf`
 
 ## Flags
 

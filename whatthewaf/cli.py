@@ -28,20 +28,16 @@ def _load_banner():
 
 _PROFILES_PATH = os.path.expanduser("~/.config/whatthewaf/profiles.conf")
 
-# Boolean flags that can be set in profiles
+# Profiles only define identity/stealth — not actions (no --trace, --waf-scan, --mitm, etc.)
 _BOOL_FLAGS = {
     "proton", "tor", "tls_rotate", "h2_rotate", "auto_retry",
-    "evasion", "waf_scan", "trace", "mitm", "json", "quiet",
-    "no_spoof_ua", "no_spoof_tls", "proxy_verbose", "origins",
-    "no_tls", "no_subs", "no_cert", "history", "no_persist",
+    "no_spoof_ua", "no_spoof_tls", "proxy_verbose",
 }
 
-# String/int flags
 _VALUE_FLAGS = {
-    "header_profile", "proxy", "dot", "doh", "ip", "path",
-    "listen_port", "random_delay", "timeout", "delay", "workers",
-    "user_agent", "only", "waf_scan_layers", "source_port",
-    "tcp_options",
+    "header_profile", "proxy", "dot", "doh",
+    "random_delay", "timeout", "delay",
+    "user_agent", "source_port", "tcp_options",
 }
 
 
