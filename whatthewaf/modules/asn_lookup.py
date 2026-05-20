@@ -1,7 +1,15 @@
 """ASN lookup via Team Cymru WHOIS — ported from the origins() shell function."""
 
+import ipaddress
 import socket
 import re
+
+from ..constants import CDN_CIDR_RANGES
+
+# Pre-compiled network objects for fast CDN IP checks
+_CDN_NETWORKS = {}
+for _provider, _cidrs in CDN_CIDR_RANGES.items():
+    _CDN_NETWORKS[_provider] = [ipaddress.ip_network(c) for c in _cidrs]
 
 # Known CDN/WAF/Cloud provider keywords for ASN classification
 # If the ASN provider name contains any of these, classify as "CDN" (meaning: not a small/unknown origin)
@@ -130,6 +138,22 @@ def classify_provider(provider):
 def is_ip(text):
     """Check if input is an IPv4 address."""
     return bool(IP_RE.match(text.strip()))
+
+
+def is_cdn_ip(ip):
+    """Fast local check if an IP belongs to a known CDN/WAF CIDR range.
+
+    Returns the provider name (e.g. 'cloudflare') or None.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for provider, networks in _CDN_NETWORKS.items():
+        for net in networks:
+            if addr in net:
+                return provider
+    return None
 
 
 def _parse_cymru_line(ip, line):

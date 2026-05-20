@@ -86,7 +86,7 @@ Vulnerabilities:  None found
 
 ### `--ip` — WAF Bypass Testing
 
-Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes to confirm bypass. Supports CIDR ranges. CDN/WAF edge IPs are automatically skipped. Each origin IP also gets:
+Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes **and HTML titles** to confirm bypass — title matching catches valid bypasses even when body hashes differ due to dynamic content. Supports CIDR ranges. Known CDN/WAF IPs are instantly filtered via local CIDR matching (Cloudflare, Fastly, CloudFront, Incapsula) before testing. Each origin IP also gets:
 - **Alternative port scan** — 12 common ports (8080, 8443, 4443, 9443, cPanel, Webmin, Plesk)
 - **Cloud metadata probe** — checks `169.254.169.254` on AWS/GCP/Azure/DO IPs for exposed metadata (IMDSv1)
 
@@ -113,7 +113,7 @@ All scans auto-store WAF detections, IPs, and findings in SQLite (`~/.local/shar
 
 ### `--recon` — Full OSINT
 
-Runs all discovery sources (DNS, subdomains, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails), correlates IPs, ranks by confidence. IPs with matching SSL certificates get `[SSL ✓]` verification.
+Runs all discovery sources (DNS, subdomains, SPF/TXT record extraction, historical DNS, SSL cert, favicon hash, GitHub leaks, Censys, Shodan, VirusTotal, Whoxy, DNSTrails), correlates IPs, ranks by confidence. SPF `ip4:` directives are parsed automatically — no API key needed. IPs with matching SSL certificates get `[SSL ✓]` verification.
 
 ### `--whoami` — Your Fingerprint
 

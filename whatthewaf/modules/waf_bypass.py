@@ -88,11 +88,15 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
         results.append(ip_result)
 
         if ip_result.get("accessible") and not ip_result.get("blocked"):
+            title_match = _titles_match(
+                baseline.get("title", ""), ip_result.get("title", "")
+            )
             finding = {
                 "type": "direct_ip",
                 "ip": ip,
                 "detail": f"Origin responds directly at {ip} with Host: {domain}",
                 "severity": "high",
+                "title_match": title_match,
                 "curl": _build_curl_direct_ip(ip, domain, 443, "https"),
                 "curl_len": _build_curl_direct_ip(ip, domain, 443, "https", diff=True),
                 "curl_resolve": _build_curl_resolve(domain, ip, 443),
@@ -100,6 +104,8 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
             if ip_result.get("waf_absent"):
                 finding["detail"] += " — WAF signatures absent from direct response"
                 finding["severity"] = "critical"
+            if title_match:
+                finding["detail"] += " [title match]"
             findings.append(finding)
 
         for port in [8080, 8443]:
@@ -108,12 +114,19 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
                 alt_result["port"] = port
                 results.append(alt_result)
                 scheme = "https" if port in (8443, 443) else "http"
+                alt_title_match = _titles_match(
+                    baseline.get("title", ""), alt_result.get("title", "")
+                )
+                detail = f"Origin accessible on port {port} at {ip}"
+                if alt_title_match:
+                    detail += " [title match]"
                 findings.append({
                     "type": "alt_port",
                     "ip": ip,
                     "port": port,
-                    "detail": f"Origin accessible on port {port} at {ip}",
+                    "detail": detail,
                     "severity": "high",
+                    "title_match": alt_title_match,
                     "curl": _build_curl_direct_ip(ip, domain, port, scheme),
                     "curl_resolve": _build_curl_resolve(domain, ip, port),
                 })
@@ -122,11 +135,18 @@ def test_bypass(domain, origin_ips, timeout=10, user_agent=None, proxy=None):
         if http_result.get("accessible"):
             http_result["scheme"] = "http"
             results.append(http_result)
+            http_title_match = _titles_match(
+                baseline.get("title", ""), http_result.get("title", "")
+            )
+            http_detail = f"Origin accessible via plain HTTP at {ip}"
+            if http_title_match:
+                http_detail += " [title match]"
             findings.append({
                 "type": "http_downgrade",
                 "ip": ip,
-                "detail": f"Origin accessible via plain HTTP at {ip}",
+                "detail": http_detail,
                 "severity": "medium",
+                "title_match": http_title_match,
                 "curl": _build_curl_direct_ip(ip, domain, 80, "http"),
                 "curl_resolve": _build_curl_resolve(domain, ip, 80, scheme="http"),
             })
@@ -290,6 +310,19 @@ def _parse_response(resp, url, label):
 def _extract_title(body):
     m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip()[:100] if m else ""
+
+
+def _titles_match(baseline_title, candidate_title):
+    """Compare HTML titles as a bypass confidence signal.
+
+    Returns True if both titles are non-empty and match (case-insensitive,
+    whitespace-normalized).
+    """
+    if not baseline_title or not candidate_title:
+        return False
+    norm_b = " ".join(baseline_title.lower().split())
+    norm_c = " ".join(candidate_title.lower().split())
+    return norm_b == norm_c
 
 
 def _has_waf_indicators(headers):

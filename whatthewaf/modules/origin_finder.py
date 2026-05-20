@@ -2,6 +2,7 @@
 
 Techniques:
 - Subdomain IP leakage (subdomains not behind CDN)
+- SPF/TXT record IP extraction
 - SSL certificate inspection
 - Historical DNS via ViewDNS.info
 - Favicon hash matching via Shodan/FOFA/ZoomEye
@@ -90,6 +91,19 @@ def find_origins(domain, cdn_ips=None, max_workers=20, timeout=3):
             except Exception:
                 pass
 
+    # SPF/TXT record IP extraction
+    spf_results = extract_ips_from_txt(domain)
+    for r in spf_results:
+        if r["ip"] not in seen_ips and r["ip"] not in cdn_ips:
+            seen_ips.add(r["ip"])
+            candidates.append(r)
+
+    # Early CDN filtering: discard IPs in known CDN CIDR ranges
+    candidates = [
+        c for c in candidates
+        if not asn_lookup.is_cdn_ip(c["ip"])
+    ]
+
     # Enrich with ASN info
     if candidates:
         ips = [c["ip"] for c in candidates]
@@ -101,6 +115,35 @@ def find_origins(domain, cdn_ips=None, max_workers=20, timeout=3):
 
     # Sort: non-CDN first, then CDN
     candidates.sort(key=lambda c: (c.get("is_cdn", False), c["ip"]))
+    return candidates
+
+
+_SPF_IP4_RE = re.compile(r"ip4:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:/\d+)?")
+
+
+def extract_ips_from_txt(domain):
+    """Extract origin IP candidates from TXT/SPF records.
+
+    Parses SPF ip4: directives which frequently leak the real server IP.
+    Returns list of dicts: ip, source, asn_info
+    """
+    info = dns_resolver.resolve_domain(domain)
+    txt_records = info.get("txt_records", [])
+    candidates = []
+    seen = set()
+
+    for txt in txt_records:
+        for match in _SPF_IP4_RE.finditer(txt):
+            ip = match.group(1)
+            if asn_lookup.is_ip(ip) and ip not in seen:
+                seen.add(ip)
+                candidates.append({
+                    "ip": ip,
+                    "source": f"spf:{domain}",
+                    "subdomain": None,
+                    "asn_info": None,
+                })
+
     return candidates
 
 
