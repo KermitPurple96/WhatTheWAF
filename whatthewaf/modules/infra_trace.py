@@ -865,6 +865,8 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         asn = asn_map.get(ip, {})
         h["provider"] = asn.get("provider", "")
         h["asn"] = asn.get("asn", "")
+        h["country"] = asn.get("country", "")
+        h["bgp_prefix"] = asn.get("bgp_prefix", "")
         h["classification"] = asn.get("classification", "")
         h["hostname"] = rdns_map.get(ip, "")
         h["cdn_provider"] = _asn_mod.is_cdn_ip(ip) if ip != "*" and not _is_private(ip) else None

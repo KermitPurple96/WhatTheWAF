@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 import os
 
@@ -2378,6 +2379,8 @@ def _print_traceroute_hops(tr, title, color):
             rtt = h.get("rtt_ms")
             provider = h.get("provider", "")
             asn = h.get("asn", "")
+            country = h.get("country", "")
+            bgp_prefix = h.get("bgp_prefix", "")
             hostname = h.get("hostname", "")
             role = h.get("role", "isp")
             cdn_provider = h.get("cdn_provider")
@@ -2393,29 +2396,39 @@ def _print_traceroute_hops(tr, title, color):
                 prev_asn = asn
 
             asn_str = f"AS{asn}" if asn else ""
+            country_str = country if country else ""
 
             # Build the info string: provider or CDN name
             if cdn_provider:
-                info = f"{cdn_provider}"
+                info = cdn_provider
             elif provider:
-                # Shorten provider: take first meaningful part
-                info = provider.split(" - ")[0].split(",")[0].strip()[:30]
+                info = provider.split(" - ")[0].split(",")[0].strip()[:25]
+            elif _is_private_display(ip):
+                info = "gateway"
             else:
                 info = ""
 
             role_str = f"[{role_tag}]" if role_tag else ""
 
-            # Hostname line (truncated, shown if different from IP)
-            host_str = ""
-            if hostname and hostname != ip:
-                short_host = hostname[:45]
-                host_str = f"\n    {DIM}    {'':20} {short_host}{RESET}"
-
+            # Main hop line
             _line(
-                f"{c}{hop_num:>2}  {ip:<20} {rtt_str:>7}  "
-                f"{asn_str:<8} {info:<30} {role_str}{RESET}{boundary}"
-                f"{host_str}"
+                f"{c}{hop_num:>2}  {ip:<18} {rtt_str:>7}  "
+                f"{asn_str:<8} {info:<25} {country_str:<3} {role_str}{RESET}{boundary}"
             )
+
+            # Detail line: hostname, prefix, POP detection
+            details = []
+            if hostname and hostname != ip:
+                details.append(hostname[:50])
+            if bgp_prefix:
+                details.append(bgp_prefix)
+            # Detect CDN POP from hostname (e.g. mad56 from cloudfront, ams from akamai)
+            if hostname and cdn_provider:
+                pop = _extract_pop(hostname, cdn_provider)
+                if pop:
+                    details.append(f"POP: {pop}")
+            if details:
+                _line(f"{DIM}    {'':18}        {' | '.join(details)}{RESET}")
 
         # (trailing * hops are already printed inline above)
 
@@ -2425,6 +2438,53 @@ def _print_traceroute_hops(tr, title, color):
             _line(f"{DIM}{tr['error']}{RESET}")
         else:
             _line(f"{DIM}traceroute failed{RESET}")
+
+
+_POP_CODES = {
+    "mad": "Madrid", "bcn": "Barcelona", "lis": "Lisbon", "lhr": "London",
+    "cdg": "Paris", "ams": "Amsterdam", "fra": "Frankfurt", "mxp": "Milan",
+    "fco": "Rome", "vie": "Vienna", "waw": "Warsaw", "prg": "Prague",
+    "zrh": "Zurich", "arn": "Stockholm", "hel": "Helsinki", "cph": "Copenhagen",
+    "osl": "Oslo", "dub": "Dublin", "bru": "Brussels", "mrs": "Marseille",
+    "jfk": "New York", "iad": "Washington DC", "ord": "Chicago",
+    "lax": "Los Angeles", "sfo": "San Francisco", "sea": "Seattle",
+    "atl": "Atlanta", "dfw": "Dallas", "mia": "Miami", "den": "Denver",
+    "bos": "Boston", "phx": "Phoenix", "pdx": "Portland", "slc": "Salt Lake City",
+    "yyz": "Toronto", "yul": "Montreal", "yvr": "Vancouver",
+    "gru": "São Paulo", "gig": "Rio de Janeiro", "eze": "Buenos Aires",
+    "scl": "Santiago", "bog": "Bogotá", "lim": "Lima", "mex": "Mexico City",
+    "nrt": "Tokyo", "hnd": "Tokyo", "kix": "Osaka", "icn": "Seoul",
+    "hkg": "Hong Kong", "sin": "Singapore", "bom": "Mumbai", "del": "Delhi",
+    "syd": "Sydney", "mel": "Melbourne", "akl": "Auckland",
+    "dxb": "Dubai", "bah": "Bahrain", "jnb": "Johannesburg", "cpt": "Cape Town",
+}
+
+
+def _extract_pop(hostname, cdn_provider):
+    """Extract CDN POP location from hostname."""
+    hostname = hostname.lower()
+    # CloudFront: server-x-x-x-x.mad56.r.cloudfront.net → mad56
+    if cdn_provider == "cloudfront":
+        m = re.match(r'server-[\d-]+\.([a-z]{3}\d+)\.', hostname)
+        if m:
+            code = m.group(1)
+            city_code = code[:3]
+            city = _POP_CODES.get(city_code, city_code.upper())
+            return f"{code} ({city})"
+    # Cloudflare: usually in headers (cf-ray), not hostname
+    # Fastly: cache-mad22948.MAD → mad
+    if cdn_provider == "fastly":
+        m = re.search(r'cache-([a-z]{3})', hostname)
+        if m:
+            city_code = m.group(1)
+            city = _POP_CODES.get(city_code, city_code.upper())
+            return f"{city_code} ({city})"
+    # Akamai: a]N].dscb.akamaiedge.net — extract from hostname region codes
+    if "akamai" in hostname:
+        for code, city in _POP_CODES.items():
+            if code in hostname:
+                return f"{code} ({city})"
+    return None
 
 
 def _expand_ip_targets(ip_arg):
