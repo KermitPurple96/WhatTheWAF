@@ -21,7 +21,7 @@ def _clear_status():
     sys.stderr.flush()
 
 RED = "\033[31m"; GREEN = "\033[32m"; YELLOW = "\033[33m"; BLUE = "\033[34m"
-CYAN = "\033[36m"; MAGENTA = "\033[35m"; BOLD = "\033[1m"; DIM = "\033[2m"; RESET = "\033[0m"
+CYAN = "\033[36m"; MAGENTA = "\033[35m"; WHITE = "\033[37m"; BOLD = "\033[1m"; DIM = "\033[2m"; RESET = "\033[0m"
 
 
 def _load_banner():
@@ -2312,6 +2312,14 @@ def _print_trace_report(domain, report):
     tr = report.get("traceroute", {})
     _print_traceroute_hops(tr, f"Network Traceroute", BLUE)
 
+    # Diagnostic hints
+    tr_hops = tr.get("hops", [])
+    if tr_hops:
+        total = len(tr_hops)
+        filtered = sum(1 for h in tr_hops if h.get("ip") == "*")
+        if total > 3 and filtered / total > 0.7:
+            print(f"\n    {DIM}Most hops filtered — likely VPN/tunnel masking intermediate routers.{RESET}")
+            print(f"    {DIM}Try: run outside VPN, or use sudo for TCP traceroute (more firewall-friendly).{RESET}")
     if tr.get("needs_root"):
         print(f"\n    {YELLOW}TCP traceroute needs root. Fix: sudo chmod u+s $(readlink -f $(which traceroute)){RESET}")
 
@@ -2342,13 +2350,24 @@ def _print_trace_report(domain, report):
 
 
 def _print_traceroute_hops(tr, title, color):
-    """Print traceroute hops with compressed filtered runs."""
+    """Print traceroute hops with role classification and hostnames."""
     tr_hops = tr.get("hops", [])
     if tr_hops:
         methods = ", ".join(tr.get("methods", []))
         _section(f"{title} ({methods})", color)
 
-        prev_provider = None
+        _ROLE_STYLE = {
+            "local":    (DIM,    "local"),
+            "isp":      (WHITE,  "isp"),
+            "ixp":      (MAGENTA, "ixp"),
+            "transit":  (CYAN,   "transit"),
+            "cdn":      (RED,    "cdn"),
+            "cloud":    (YELLOW, "cloud"),
+            "hosting":  (GREEN,  "hosting"),
+            "filtered": (DIM,    ""),
+        }
+
+        prev_asn = None
         filtered_run = 0
         for h in tr_hops:
             hop_num = h.get("hop", "?")
@@ -2358,47 +2377,64 @@ def _print_traceroute_hops(tr, title, color):
                 filtered_run += 1
                 continue
 
-            # Print compressed filtered summary before this real hop
+            # Print compressed filtered hops
             if filtered_run > 0:
                 if filtered_run <= 2:
                     for _ in range(filtered_run):
-                        _line(f"{DIM} ·  {'*':<16}          filtered{RESET}")
+                        _line(f"{DIM} ·  {'*':<20}                          filtered{RESET}")
                 else:
-                    _line(f"{DIM} ·  {'*':<16}          {filtered_run} hops filtered{RESET}")
+                    _line(f"{DIM} ·  {'*':<20}                          {filtered_run} hops filtered{RESET}")
                 filtered_run = 0
 
             rtt = h.get("rtt_ms")
             provider = h.get("provider", "")
             asn = h.get("asn", "")
-            cls = h.get("classification", "")
+            hostname = h.get("hostname", "")
+            role = h.get("role", "isp")
+            cdn_provider = h.get("cdn_provider")
             rtt_str = f"{rtt:.1f}ms" if rtt is not None else ""
 
-            if _is_private_display(ip):
-                c = DIM
-                label = "local"
-            elif cls == "CDN":
-                c = RED
-                label = "CDN"
-            else:
-                c = GREEN
-                label = ""
+            c, role_tag = _ROLE_STYLE.get(role, (WHITE, role))
 
+            # Boundary marker when ASN changes
             boundary = ""
-            short_provider = provider[:40] if provider else ""
-            if provider and provider != prev_provider and prev_provider is not None:
+            if asn and asn != prev_asn and prev_asn is not None:
                 boundary = f" {YELLOW}◄{RESET}"
-            prev_provider = provider
+            if asn:
+                prev_asn = asn
 
             asn_str = f"AS{asn}" if asn else ""
-            cls_str = f" [{label}]" if label else ""
+
+            # Build the info string: provider or CDN name
+            if cdn_provider:
+                info = f"{cdn_provider}"
+            elif provider:
+                # Shorten provider: take first meaningful part
+                info = provider.split(" - ")[0].split(",")[0].strip()[:30]
+            else:
+                info = ""
+
+            role_str = f"[{role_tag}]" if role_tag else ""
+
+            # Hostname line (truncated, shown if different from IP)
+            host_str = ""
+            if hostname and hostname != ip:
+                short_host = hostname[:45]
+                host_str = f"\n    {DIM}    {'':20} {short_host}{RESET}"
+
             _line(
-                f"{c}{hop_num:>2}  {ip:<16} {rtt_str:>8}  "
-                f"{asn_str:<8} {short_provider}{cls_str}{RESET}{boundary}"
+                f"{c}{hop_num:>2}  {ip:<20} {rtt_str:>7}  "
+                f"{asn_str:<8} {info:<30} {role_str}{RESET}{boundary}"
+                f"{host_str}"
             )
 
         # Trailing filtered
         if filtered_run > 0:
-            _line(f"{DIM} ·  {'*':<16}          {filtered_run} hops filtered{RESET}")
+            if filtered_run <= 2:
+                for _ in range(filtered_run):
+                    _line(f"{DIM} ·  {'*':<20}                          filtered{RESET}")
+            else:
+                _line(f"{DIM} ·  {'*':<20}                          {filtered_run} hops filtered{RESET}")
 
     elif tr.get("methods") is not None and not tr.get("methods"):
         _section(title, color)

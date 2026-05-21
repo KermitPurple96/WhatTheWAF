@@ -781,6 +781,12 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
              "-w", str(timeout), domain],
             "icmp", False
         ))
+        # UDP (default traceroute, different filtering behavior than ICMP)
+        cmds.append((
+            [tr_bin, "-n", "-q", "1", "-m", str(max_hops),
+             "-w", str(timeout), domain],
+            "udp", False
+        ))
         # TCP on port 443 (needs root or setuid — best for web targets)
         tcp_cmd = [tr_bin, "-T", "-p", "443", "-n", "-q", "1",
                    "-m", str(max_hops), "-w", str(timeout), domain]
@@ -796,46 +802,38 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         result["error"] = "traceroute not installed"
         return result
 
-    _status("trace", "Network traceroute (ICMP + TCP:443)")
+    _status("trace", "Network traceroute (ICMP + UDP + TCP:443)")
 
-    icmp_hops = None
-    tcp_hops = None
+    all_results = {}  # label -> hops
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = {}
         for cmd, label, root in cmds:
             futures[pool.submit(_run_cmd, cmd, label)] = (label, root)
 
         for f in concurrent.futures.as_completed(futures):
             label, root = futures[f]
-            hops = f.result()
-            if hops:
-                if label == "icmp":
-                    icmp_hops = hops
-                    methods.append("icmp")
-                elif not tcp_hops:
-                    tcp_hops = hops
-                    methods.append(label)
-            elif root and not hops:
+            hops_result = f.result()
+            if hops_result:
+                all_results[label] = hops_result
+                methods.append(label)
+            elif root and not hops_result:
                 needs_root = True
 
-    # Merge: TCP > ICMP, fill gaps between them
-    if tcp_hops and icmp_hops:
-        merged = {}
-        for h in icmp_hops:
-            merged[h["hop"]] = h
-        for h in tcp_hops:
-            if h["ip"] != "*" or h["hop"] not in merged:
-                merged[h["hop"]] = h
-        hops = [merged[k] for k in sorted(merged.keys())]
-    elif tcp_hops:
-        hops = tcp_hops
-    elif icmp_hops:
-        hops = icmp_hops
-    else:
+    if not all_results:
         result["methods"] = []
         result["needs_root"] = needs_root
         return result
+
+    # Merge all methods: prefer real IPs over *, priority TCP > ICMP > UDP
+    merged = {}
+    priority = ["udp", "icmp", "tcp:443", "tcptraceroute"]
+    for label in priority:
+        for h in all_results.get(label, []):
+            hop_n = h["hop"]
+            if hop_n not in merged or (h["ip"] != "*" and merged[hop_n]["ip"] == "*"):
+                merged[hop_n] = h
+    hops = [merged[k] for k in sorted(merged.keys())]
 
     # Filter trailing * hops
     while hops and hops[-1]["ip"] == "*":
@@ -853,22 +851,104 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         except Exception:
             pass
 
-    # Enrich hops with ASN data
+    # Reverse DNS for all real IPs (parallel, fast)
+    rdns_map = {}
+    real_and_private = [h["ip"] for h in hops if h["ip"] != "*"]
+    if real_and_private:
+        _status("trace", f"Reverse DNS for {len(real_and_private)} hop(s)")
+        rdns_map = _bulk_rdns(real_and_private)
+
+    # Enrich hops with ASN data, rDNS, CDN CIDR, and role classification
+    from . import asn_lookup as _asn_mod
     for h in hops:
-        asn = asn_map.get(h["ip"], {})
+        ip = h["ip"]
+        asn = asn_map.get(ip, {})
         h["provider"] = asn.get("provider", "")
         h["asn"] = asn.get("asn", "")
         h["classification"] = asn.get("classification", "")
+        h["hostname"] = rdns_map.get(ip, "")
+        h["cdn_provider"] = _asn_mod.is_cdn_ip(ip) if ip != "*" and not _is_private(ip) else None
+        h["role"] = _classify_hop_role(h)
 
     result["hops"] = hops
     result["methods"] = methods
-    result["needs_root"] = needs_root and not tcp_hops
+    has_tcp = any(m.startswith("tcp") for m in methods)
+    result["needs_root"] = needs_root and not has_tcp
     if hops:
         last_real = next((h for h in reversed(hops) if h["ip"] != "*"), None)
         if last_real:
             result["target_ip"] = last_real["ip"]
 
     return result
+
+
+def _bulk_rdns(ips, timeout=2):
+    """Parallel reverse DNS lookup for a list of IPs."""
+    import concurrent.futures
+    import socket
+
+    def _rdns(ip):
+        try:
+            host, _, _ = socket.gethostbyaddr(ip)
+            return ip, host
+        except Exception:
+            return ip, ""
+
+    result = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ips), 15)) as pool:
+        for ip, host in pool.map(_rdns, ips, timeout=timeout + 5):
+            result[ip] = host
+    return result
+
+
+# Keywords for classifying hop roles
+_IXP_KEYWORDS = ["ix", "ixp", "exchange", "peering", "nap", "cix", "linx",
+                  "amsix", "de-cix", "espanix", "catnix"]
+_TRANSIT_KEYWORDS = ["transit", "backbone", "core", "telia", "lumen", "ntt",
+                     "cogent", "gtt", "zayo", "level3", "hurricane"]
+_HOSTING_KEYWORDS = ["hosting", "hetzner", "ovh", "digitalocean", "linode",
+                     "vultr", "rackspace"]
+
+
+def _classify_hop_role(hop):
+    """Classify a traceroute hop's network role.
+
+    Returns: 'local', 'isp', 'ixp', 'transit', 'cdn', 'hosting', 'cloud', or 'target'
+    """
+    ip = hop.get("ip", "*")
+    if ip == "*":
+        return "filtered"
+    if _is_private(ip):
+        return "local"
+
+    provider = hop.get("provider", "").lower()
+    hostname = hop.get("hostname", "").lower()
+    cdn_provider = hop.get("cdn_provider")
+    cls = hop.get("classification", "")
+
+    # CDN detection (CIDR match or ASN classification)
+    if cdn_provider or cls == "CDN":
+        return "cdn"
+
+    # IXP detection from hostname or provider
+    combined = f"{provider} {hostname}"
+    if any(kw in combined for kw in _IXP_KEYWORDS):
+        return "ixp"
+
+    # Transit/backbone
+    if any(kw in combined for kw in _TRANSIT_KEYWORDS):
+        return "transit"
+
+    # Cloud providers (not CDN but cloud infra)
+    cloud_kw = ["amazon", "aws", "google", "gcp", "microsoft", "azure", "oracle"]
+    if any(kw in provider for kw in cloud_kw):
+        return "cloud"
+
+    # Hosting
+    if any(kw in combined for kw in _HOSTING_KEYWORDS):
+        return "hosting"
+
+    return "isp"
 
 
 def _is_private(ip: str) -> bool:
