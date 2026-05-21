@@ -898,6 +898,7 @@ def _fetch_bgp_as_path(target_ip, timeout=10):
     the most common AS path from European vantage points.
     """
     import urllib.request
+    import ssl
     import json as _json
 
     try:
@@ -911,7 +912,10 @@ def _fetch_bgp_as_path(target_ip, timeout=10):
         url = (f"https://stat.ripe.net/data/looking-glass/data.json"
                f"?resource={prefix}&sourceapp=whatthewaf")
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        data = _json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        data = _json.loads(urllib.request.urlopen(req, timeout=timeout, context=ctx).read())
 
         # Collect all AS paths and find the most common
         path_counts = {}
