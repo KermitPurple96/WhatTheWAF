@@ -2936,8 +2936,29 @@ def _run_direct_ip(targets, args):
                 print(f"{YELLOW}[!] No origin IP candidates found for {domain}{RESET}", file=sys.stderr)
                 continue
 
-            # ASN-classify all candidates and skip CDN/WAF edge IPs
+            # Fast local CIDR check: discard IPs in known CDN ranges before ASN lookup
             from .modules import asn_lookup as _asn
+            cidr_filtered = []
+            cidr_skipped = []
+            for t in test_ips:
+                cdn_provider = _asn.is_cdn_ip(t["ip"])
+                if cdn_provider:
+                    cidr_skipped.append((t, cdn_provider))
+                else:
+                    cidr_filtered.append(t)
+            if cidr_skipped:
+                print(f"{DIM}[*] Filtered {len(cidr_skipped)} IP(s) in known CDN CIDR ranges:{RESET}", file=sys.stderr)
+                for t, prov in cidr_skipped[:5]:
+                    print(f"    {DIM}{t['ip']:<16} {prov}{RESET}", file=sys.stderr)
+                if len(cidr_skipped) > 5:
+                    print(f"    {DIM}... and {len(cidr_skipped) - 5} more{RESET}", file=sys.stderr)
+            test_ips = cidr_filtered
+
+            if not test_ips:
+                print(f"{YELLOW}[!] All IPs are in known CDN ranges — no origin candidates to test{RESET}", file=sys.stderr)
+                continue
+
+            # ASN-classify remaining candidates and skip CDN/WAF edge IPs
             all_candidate_ips = [t["ip"] for t in test_ips]
             asn_info = _asn.lookup_asn_bulk(all_candidate_ips) if all_candidate_ips else []
             asn_map = {r["ip"]: r for r in asn_info}
