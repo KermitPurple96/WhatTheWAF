@@ -494,6 +494,8 @@ def _run_whoami(proxy=None):
 
     # 1. Public IP + geolocation via ipquery.io
     print(f"\n  {BOLD}Network{RESET}")
+    ip = "?"
+    isp = {}
     try:
         resp = _http_get("https://api.ipquery.io/?format=json", proxy=proxy)
         if resp and resp.status_code == 200:
@@ -506,13 +508,29 @@ def _run_whoami(proxy=None):
             print(f"    IP:          {BOLD}{ip}{RESET}")
             if isp.get("org"):
                 print(f"    ISP:         {isp.get('isp', '')} ({isp.get('org', '')})")
-                print(f"    ASN:         AS{isp.get('asn', '?')}")
+                _asn_display = str(isp.get('asn', '?'))
+                if not _asn_display.startswith("AS"):
+                    _asn_display = f"AS{_asn_display}"
+                print(f"    ASN:         {_asn_display}")
             if location.get("country"):
                 city = location.get("city", "")
                 country = location.get("country", "")
                 print(f"    Location:    {city}, {country}" if city else f"    Location:    {country}")
                 if location.get("timezone"):
                     print(f"    Timezone:    {location['timezone']}")
+
+            # BGP info via Team Cymru
+            try:
+                from .modules import asn_lookup
+                asn_info = asn_lookup.lookup_asn_bulk([ip])
+                if asn_info:
+                    a = asn_info[0]
+                    if a.get("bgp_prefix"):
+                        print(f"    BGP Prefix:  {a['bgp_prefix']}")
+                    if a.get("provider"):
+                        print(f"    Provider:    {a['provider']}")
+            except Exception:
+                pass
 
             # Risk flags
             risk_flags = []
@@ -527,7 +545,40 @@ def _run_whoami(proxy=None):
     except Exception as e:
         print(f"    {RED}Could not determine IP: {e}{RESET}")
 
-    # 2. TLS fingerprint (direct — not through proxy, to show your raw TLS)
+    # 2. BGP neighbours (upstreams/peers)
+    print(f"\n  {BOLD}BGP Routing{RESET}")
+    try:
+        import urllib.request
+        import ssl as _ssl
+        _ctx = _ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode = _ssl.CERT_NONE
+        _asn_raw = isp.get("asn", "")
+        _asn_num = str(_asn_raw).replace("AS", "").strip()
+        if _asn_num:
+            _url = f"https://stat.ripe.net/data/asn-neighbours/data.json?resource=AS{_asn_num}&sourceapp=whatthewaf"
+            _req = urllib.request.Request(_url, headers={"User-Agent": "Mozilla/5.0"})
+            import json as _json
+            _bgp_data = _json.loads(urllib.request.urlopen(_req, timeout=8, context=_ctx).read())
+            _neighbours = _bgp_data.get("data", {}).get("neighbours", [])
+            _upstreams = sorted([n for n in _neighbours if n.get("type") == "left"],
+                                key=lambda x: -x.get("power", 0))
+            if _upstreams:
+                # Resolve names for top upstreams
+                from .modules.infra_trace import _cymru_asn_name
+                print(f"    You:         {BOLD}AS{_asn_num}{RESET} ({isp.get('org', isp.get('isp', ''))})")
+                print(f"    Upstreams:")
+                for u in _upstreams[:5]:
+                    u_info = _cymru_asn_name(u["asn"])
+                    u_name = u_info.get("provider", "").split(",")[0].strip()[:35]
+                    u_country = u_info.get("country", "")
+                    print(f"      → AS{u['asn']:<8} {u_name:<35} {u_country}")
+            else:
+                print(f"    AS{_asn_num}: no upstream data available")
+    except Exception:
+        print(f"    {DIM}Could not fetch BGP data{RESET}")
+
+    # 3. TLS fingerprint (direct — not through proxy, to show your raw TLS)
     print(f"\n  {BOLD}TLS Fingerprint{RESET}")
     try:
         ctx = ssl.create_default_context()
