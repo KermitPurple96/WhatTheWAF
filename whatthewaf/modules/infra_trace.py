@@ -886,16 +886,58 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     filtered = sum(1 for h in hops if h["ip"] == "*")
     if total > 3 and filtered / total > 0.5 and result.get("target_ip"):
         _status("trace", "BGP AS path lookup (RIPE RIS)")
-        result["as_path"] = _fetch_bgp_as_path(result["target_ip"])
+        # Detect user's ASN from public IP for accurate path
+        my_asn = _detect_my_asn()
+        result["as_path"] = _fetch_bgp_as_path(result["target_ip"], my_asn=my_asn)
+        result["my_asn"] = my_asn
 
     return result
 
 
-def _fetch_bgp_as_path(target_ip, timeout=10):
+def _get_upstream_asns(asn, timeout=5):
+    """Get upstream/peer ASNs for a given AS via RIPE RIS."""
+    import urllib.request
+    import ssl
+    import json as _json
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        url = f"https://stat.ripe.net/data/asn-neighbours/data.json?resource=AS{asn}&sourceapp=whatthewaf"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = _json.loads(urllib.request.urlopen(req, timeout=timeout, context=ctx).read())
+        neighbours = data.get("data", {}).get("neighbours", [])
+        return {str(n["asn"]) for n in neighbours if n.get("type") == "left"}
+    except Exception:
+        return set()
+
+
+def _detect_my_asn():
+    """Detect the user's ASN from their public IP."""
+    import urllib.request
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request("https://api.ipquery.io/?format=json",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        import json as _json
+        data = _json.loads(urllib.request.urlopen(req, timeout=5, context=ctx).read())
+        asn = str(data.get("isp", {}).get("asn", "")).replace("AS", "")
+        return asn if asn else None
+    except Exception:
+        return None
+
+
+def _fetch_bgp_as_path(target_ip, my_asn=None, timeout=10):
     """Fetch BGP AS path to target via RIPE RIS looking glass.
 
+    If my_asn is provided, tries to find a path that starts from that AS
+    or one of its known upstreams, for a more accurate "from your network" view.
+
     Returns list of dicts: [{asn, provider, country, role}] representing
-    the most common AS path from European vantage points.
+    the AS path to the target.
     """
     import urllib.request
     import ssl
@@ -917,19 +959,54 @@ def _fetch_bgp_as_path(target_ip, timeout=10):
         ctx.verify_mode = ssl.CERT_NONE
         data = _json.loads(urllib.request.urlopen(req, timeout=timeout, context=ctx).read())
 
-        # Collect all AS paths and find the most common
-        path_counts = {}
+        # Collect all AS paths
+        all_paths = []
         for rrc in data.get("data", {}).get("rrcs", []):
             for peer in rrc.get("peers", []):
                 path = peer.get("as_path", "").strip()
                 if path:
-                    path_counts[path] = path_counts.get(path, 0) + 1
+                    all_paths.append(path)
 
-        if not path_counts:
+        if not all_paths:
             return []
 
-        # Pick the most common path
-        best_path = max(path_counts, key=path_counts.get)
+        # Try to find a path from our AS or its upstreams
+        best_path = None
+        if my_asn:
+            my_asn_str = str(my_asn).replace("AS", "")
+
+            # Get our upstream ASNs
+            my_upstreams = _get_upstream_asns(my_asn_str)
+            search_asns = {my_asn_str} | my_upstreams
+
+            # Find path containing our AS or an upstream, prefer shortest
+            candidates = []
+            for p in all_paths:
+                parts = p.split()
+                for sa in search_asns:
+                    if sa in parts:
+                        # Trim path to start from the matched AS
+                        idx = parts.index(sa)
+                        trimmed = parts[idx:]
+                        candidates.append((sa == my_asn_str, len(trimmed), trimmed))
+                        break
+
+            if candidates:
+                # Prefer exact AS match, then shortest path
+                candidates.sort(key=lambda x: (-x[0], x[1]))
+                best_parts = candidates[0][2]
+                # Prepend our AS if path starts from upstream
+                if best_parts[0] != my_asn_str:
+                    best_parts = [my_asn_str] + best_parts
+                best_path = " ".join(best_parts)
+
+        # Fallback: most common path
+        if not best_path:
+            path_counts = {}
+            for p in all_paths:
+                path_counts[p] = path_counts.get(p, 0) + 1
+            best_path = max(path_counts, key=path_counts.get)
+
         asns = best_path.split()
 
         # Resolve ASN names via Team Cymru
