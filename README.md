@@ -52,17 +52,30 @@ Plan:         Akamai Standard (conf=40%)
 Maps every layer of the traffic path and runs network traceroute:
 
 ```
-AWS CloudFront [CDN]  →  Akamai [CDN/WAF]  →  unified-edge-router [PROXY]  →  Next.js [FRAMEWORK]
+── Traffic Path ──
+  AWS CloudFront [CDN]  →  Akamai [CDN/WAF]  →  unified-edge-router [PROXY]  →  Next.js [FRAMEWORK]
+
+── Network Traceroute (icmp, tcptraceroute, tcp:443, udp) ──
+   1  192.168.222.2        0.2ms           gateway                       [local]
+   2  65.8.202.125         9.4ms  AS16509  cloudfront                US  [cdn]
+                                 server-65-8-202-125.mad56.r.cloudfront.net | 65.8.202.0/23 | POP: mad56 (Madrid)
+   3  *                                                       *
+  ...
+  15  65.8.202.125         7.3ms  AS16509  cloudfront                US  [cdn]
+                                 server-65-8-202-125.mad56.r.cloudfront.net | 65.8.202.0/23 | POP: mad56 (Madrid)
 ```
 
 Fingerprints 11 layers: CDN/WAF, cache (Varnish, Squid), load balancers (HAProxy, F5, ALB), proxies (nginx, Envoy), hosting (SiteGround, WP Engine, Heroku), web servers (Apache, IIS), runtimes (PHP, Java, Node.js, Python), frameworks (Django, Laravel, Rails, Next.js), and CMS (WordPress, Drupal, Magento).
 
-Also runs:
-- **Network traceroute** (ICMP + TCP:443) with ASN classification per hop. TCP needs root — fix with `sudo chmod u+s $(readlink -f $(which traceroute))`
-- **Subdomain takeover detection** — checks 50+ subdomains for dangling CNAMEs against 30+ provider fingerprints (S3, GitHub Pages, Heroku, Azure, Fastly, Netlify, etc.)
-- **Cache poisoning tests** — probes unkeyed header injection (`X-Forwarded-Host`, `X-Original-URL`) and cache deception (path confusion with static extensions)
+**Network traceroute** runs ICMP, UDP, and TCP:443 in parallel, merges results for maximum hop visibility. Each hop shows:
+- **IP, latency, ASN, provider, country** — full network identification
+- **Reverse DNS hostname** — reveals CDN edge names, ISP routers, IXP peering points
+- **BGP prefix** — the announced route (e.g. `65.8.202.0/23`)
+- **CDN POP detection** — extracts point-of-presence from hostname (50+ airport codes: `mad56` → Madrid, `lhr` → London, etc.)
+- **Hop role classification** — `[local]` `[isp]` `[ixp]` `[transit]` `[cdn]` `[cloud]` `[hosting]`
+- **ASN boundary markers** — `◄` when traffic crosses between networks
 
-Example: found `X-Forwarded-Host` cache poisoning on nike.com (cacheable `max-age=699`)
+TCP traceroute needs root — fix with `sudo chmod u+s $(readlink -f $(which traceroute))`. TCP:443 often reveals hops that ICMP/UDP miss (intermediate routers that only respond to TCP SYN).
 
 Combinable with other flags:
 
@@ -70,6 +83,7 @@ Combinable with other flags:
 wtw example.com --trace --ip 203.0.113.50   # Compare CDN vs direct route
 wtw example.com --trace --ip auto            # Discover + trace to origins
 wtw example.com --trace --evasion            # Trace + evasion analysis
+wtw example.com --trace --waf-scan           # Trace + subdomain takeover + cache poisoning
 ```
 
 ### `--tls` — TLS/SSL Audit
@@ -86,7 +100,16 @@ Vulnerabilities:  None found
 
 ### `--ip` — WAF Bypass Testing
 
-Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares body hashes **and HTML titles** to confirm bypass — title matching catches valid bypasses even when body hashes differ due to dynamic content. Supports CIDR ranges. Known CDN/WAF IPs are instantly filtered via local CIDR matching (Cloudflare, Fastly, CloudFront, Incapsula) before testing. Each origin IP also gets:
+Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Three layers of verification:
+1. **Body hash comparison** — identical content = confirmed bypass
+2. **HTML title matching** — catches valid bypasses on dynamic-content sites where body hashes differ
+3. **WAF signature diff** — compares WAF headers in CDN vs direct response
+
+**CDN CIDR pre-filtering** — before any network requests, IPs are checked against 200+ known CDN CIDR ranges (Cloudflare, Fastly, CloudFront with 204 ranges from AWS, Incapsula). On nike.com this filters 119 CloudFront edge IPs instantly.
+
+**SPF origin extraction** — parses `ip4:` directives from TXT/SPF records to find origin IPs that bypass the CDN (no API key needed). Inspired by [CF-Hero](https://github.com/musana/CF-Hero).
+
+Each origin IP also gets:
 - **Alternative port scan** — 12 common ports (8080, 8443, 4443, 9443, cPanel, Webmin, Plesk)
 - **Cloud metadata probe** — checks `169.254.169.254` on AWS/GCP/Azure/DO IPs for exposed metadata (IMDSv1)
 
@@ -94,7 +117,7 @@ Connects directly to an IP with `Host: target.com`, bypassing CDN/WAF. Compares 
 |------|-------------|
 | `--ip 1.2.3.4` | Test specific IP(s) — CDN edges auto-filtered |
 | `--ip 1.2.3.0/24` | Test all 254 IPs in a /24 range |
-| `--ip auto` | Discover origin IPs via OSINT and test all |
+| `--ip auto` | Discover origin IPs via OSINT, filter CDN CIDRs, test remaining |
 | `--ip history` | Re-test stored IPs from previous scans — no API calls |
 
 ### `--evasion` — Quick WAF Recon (~30 requests)
