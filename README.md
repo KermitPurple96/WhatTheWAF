@@ -73,6 +73,13 @@ Maps every layer of the traffic path and runs network traceroute:
   ...
   15  65.8.202.125         7.3ms  AS16509  cloudfront                US  [cdn]
                                  server-65-8-202-125.mad56.r.cloudfront.net | 65.8.202.0/23 | POP: mad56 (Madrid)
+
+── BGP AS Path (intermediate networks) ──
+  AS3352 TELEFONICA_DE_ESPANA  →  AS12956 TELXIUS  →  AS16509 AMAZON-02
+
+  AS3352     TELEFONICA_DE_ESPANA                     ES  [isp]
+  AS12956    TELXIUS TELXIUS Cable                    ES  [isp]
+  AS16509    AMAZON-02 - Amazon.com                   US  [cdn]
 ```
 
 Fingerprints 11 layers: CDN/WAF, cache (Varnish, Squid), load balancers (HAProxy, F5, ALB), proxies (nginx, Envoy), hosting (SiteGround, WP Engine, Heroku), web servers (Apache, IIS), runtimes (PHP, Java, Node.js, Python), frameworks (Django, Laravel, Rails, Next.js), and CMS (WordPress, Drupal, Magento).
@@ -84,6 +91,7 @@ Fingerprints 11 layers: CDN/WAF, cache (Varnish, Squid), load balancers (HAProxy
 - **CDN POP detection** — extracts point-of-presence from hostname (50+ airport codes: `mad56` → Madrid, `lhr` → London, etc.)
 - **Hop role classification** — `[local]` `[isp]` `[ixp]` `[transit]` `[cdn]` `[cloud]` `[hosting]`
 - **ASN boundary markers** — `◄` when traffic crosses between networks
+- **BGP AS path** — when hops are filtered, shows the intermediate networks from your AS to the target via RIPE RIS. Detects your ASN automatically and finds the real route through your upstreams.
 
 TCP traceroute needs root — fix with `sudo chmod u+s $(readlink -f $(which traceroute))`. TCP:443 often reveals hops that ICMP/UDP miss (intermediate routers that only respond to TCP SYN).
 
@@ -150,7 +158,23 @@ Runs all discovery sources (DNS, subdomains, SPF/TXT record extraction, historic
 
 ### `--whoami` — Your Fingerprint
 
-Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Supports `--proxy` to verify your fingerprint through the MITM proxy.
+Shows what servers see when you connect: public IP, ISP, geolocation, VPN/Tor/proxy detection, TLS version, cipher suite count, User-Agent, TCP TTL. Now includes **BGP routing** — your ASN, BGP prefix, and upstream providers via RIPE RIS.
+
+```
+Network
+  IP:          83.48.102.119
+  ASN:         AS3352
+  BGP Prefix:  83.48.0.0/16
+  Provider:    TELEFONICA_DE_ESPANA, ES
+  Detected as: Residential
+
+BGP Routing
+  You:         AS3352 (TELEFONICA DE ESPANA S.A.U.)
+  Upstreams:
+    → AS12956    TELXIUS TELXIUS Cable               ES
+    → AS15704    XTRA Telecom                        ES
+    → AS8220     COLT COLT Technology Services Group  GB
+```
 
 ```bash
 wtw --whoami                                   # Direct fingerprint
