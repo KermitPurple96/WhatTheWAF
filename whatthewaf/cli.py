@@ -2367,23 +2367,13 @@ def _print_traceroute_hops(tr, title, color):
         }
 
         prev_asn = None
-        filtered_run = 0
         for h in tr_hops:
             hop_num = h.get("hop", "?")
             ip = h.get("ip", "*")
 
             if ip == "*":
-                filtered_run += 1
+                _line(f"{DIM}{hop_num:>2}  {'*':<20}                                    *{RESET}")
                 continue
-
-            # Print compressed filtered hops
-            if filtered_run > 0:
-                if filtered_run <= 2:
-                    for _ in range(filtered_run):
-                        _line(f"{DIM} ·  {'*':<20}                          filtered{RESET}")
-                else:
-                    _line(f"{DIM} ·  {'*':<20}                          {filtered_run} hops filtered{RESET}")
-                filtered_run = 0
 
             rtt = h.get("rtt_ms")
             provider = h.get("provider", "")
@@ -2427,13 +2417,7 @@ def _print_traceroute_hops(tr, title, color):
                 f"{host_str}"
             )
 
-        # Trailing filtered
-        if filtered_run > 0:
-            if filtered_run <= 2:
-                for _ in range(filtered_run):
-                    _line(f"{DIM} ·  {'*':<20}                          filtered{RESET}")
-            else:
-                _line(f"{DIM} ·  {'*':<20}                          {filtered_run} hops filtered{RESET}")
+        # (trailing * hops are already printed inline above)
 
     elif tr.get("methods") is not None and not tr.get("methods"):
         _section(title, color)
