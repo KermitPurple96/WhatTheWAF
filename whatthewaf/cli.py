@@ -3171,12 +3171,19 @@ def _quick_probe_ips(ips, domain, timeout=5):
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ips), 20)) as pool:
         futures = {pool.submit(_probe_one, ip): ip for ip in ips}
-        for future in concurrent.futures.as_completed(futures, timeout=timeout + 10):
-            ip = futures[future]
-            try:
-                results[ip] = future.result()
-            except Exception:
-                results[ip] = {"error": "probe failed"}
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=timeout + 10):
+                ip = futures[future]
+                try:
+                    results[ip] = future.result()
+                except Exception:
+                    results[ip] = {"error": "probe failed"}
+        except TimeoutError:
+            # Some probes hung — mark unfinished ones as timed out
+            for future, ip in futures.items():
+                if ip not in results:
+                    results[ip] = {"error": "timeout"}
+                    future.cancel()
 
     return results
 
