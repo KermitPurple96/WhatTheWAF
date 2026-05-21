@@ -2312,14 +2312,38 @@ def _print_trace_report(domain, report):
     tr = report.get("traceroute", {})
     _print_traceroute_hops(tr, f"Network Traceroute", BLUE)
 
+    # BGP AS path — shows intermediate networks when hops are filtered
+    as_path = tr.get("as_path", [])
+    if as_path:
+        _ROLE_STYLE_PATH = {
+            "isp": WHITE, "transit": CYAN, "ixp": MAGENTA,
+            "cdn": RED, "cloud": YELLOW, "hosting": GREEN,
+        }
+        _section("BGP AS Path (intermediate networks)", BLUE)
+        # Arrow chain summary
+        chain_parts = []
+        for a in as_path:
+            role = a.get("role", "isp")
+            c = _ROLE_STYLE_PATH.get(role, WHITE)
+            short = a["provider"].split(" - ")[0].split(",")[0].strip()[:20]
+            chain_parts.append(f"{c}{BOLD}AS{a['asn']}{RESET} {short}")
+        print(f"    {'  →  '.join(chain_parts)}")
+        print()
+        # Detail table
+        for a in as_path:
+            role = a.get("role", "isp")
+            c = _ROLE_STYLE_PATH.get(role, WHITE)
+            country = a.get("country", "")
+            provider = a["provider"].split(",")[0].strip()[:40]
+            _line(f"{c}AS{a['asn']:<8} {provider:<40} {country:<3} [{role}]{RESET}")
+
     # Diagnostic hints
     tr_hops = tr.get("hops", [])
     if tr_hops:
         total = len(tr_hops)
         filtered = sum(1 for h in tr_hops if h.get("ip") == "*")
         if total > 3 and filtered / total > 0.7:
-            print(f"\n    {DIM}Most hops filtered — likely VPN/tunnel masking intermediate routers.{RESET}")
-            print(f"    {DIM}Try: run outside VPN, or use sudo for TCP traceroute (more firewall-friendly).{RESET}")
+            print(f"\n    {DIM}Filtered hops: routers with ICMP/UDP disabled (normal). BGP path above shows the networks.{RESET}")
     if tr.get("needs_root"):
         print(f"\n    {YELLOW}TCP traceroute needs root. Fix: sudo chmod u+s $(readlink -f $(which traceroute)){RESET}")
 

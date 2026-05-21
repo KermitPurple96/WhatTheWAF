@@ -881,7 +881,110 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         if last_real:
             result["target_ip"] = last_real["ip"]
 
+    # If many hops are filtered, fetch BGP AS path to show intermediate networks
+    total = len(hops)
+    filtered = sum(1 for h in hops if h["ip"] == "*")
+    if total > 3 and filtered / total > 0.5 and result.get("target_ip"):
+        _status("trace", "BGP AS path lookup (RIPE RIS)")
+        result["as_path"] = _fetch_bgp_as_path(result["target_ip"])
+
     return result
+
+
+def _fetch_bgp_as_path(target_ip, timeout=10):
+    """Fetch BGP AS path to target via RIPE RIS looking glass.
+
+    Returns list of dicts: [{asn, provider, country, role}] representing
+    the most common AS path from European vantage points.
+    """
+    import urllib.request
+    import json as _json
+
+    try:
+        # Get BGP prefix for this IP first
+        from . import asn_lookup
+        asn_info = asn_lookup.lookup_asn_bulk([target_ip])
+        prefix = asn_info[0].get("bgp_prefix", "") if asn_info else ""
+        if not prefix:
+            return []
+
+        url = (f"https://stat.ripe.net/data/looking-glass/data.json"
+               f"?resource={prefix}&sourceapp=whatthewaf")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = _json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+
+        # Collect all AS paths and find the most common
+        path_counts = {}
+        for rrc in data.get("data", {}).get("rrcs", []):
+            for peer in rrc.get("peers", []):
+                path = peer.get("as_path", "").strip()
+                if path:
+                    path_counts[path] = path_counts.get(path, 0) + 1
+
+        if not path_counts:
+            return []
+
+        # Pick the most common path
+        best_path = max(path_counts, key=path_counts.get)
+        asns = best_path.split()
+
+        # Resolve ASN names via Team Cymru
+        result = []
+        seen = set()
+        for asn_str in asns:
+            if asn_str in seen:
+                continue
+            seen.add(asn_str)
+            try:
+                info = _cymru_asn_name(asn_str)
+                provider = info.get("provider", f"AS{asn_str}")
+                country = info.get("country", "")
+            except Exception:
+                provider = f"AS{asn_str}"
+                country = ""
+
+            # Classify role
+            provider_lower = provider.lower()
+            transit_kw = ["telia", "cogent", "ntt", "lumen", "gtt", "zayo",
+                          "level3", "hurricane", "seabone", "arelion"]
+            ixp_kw = ["ix", "exchange", "peering"]
+            cdn_kw = ["cloudflare", "akamai", "fastly", "cloudfront", "amazon"]
+
+            if any(k in provider_lower for k in cdn_kw):
+                role = "cdn"
+            elif any(k in provider_lower for k in transit_kw):
+                role = "transit"
+            elif any(k in provider_lower for k in ixp_kw):
+                role = "ixp"
+            else:
+                role = "isp"
+
+            result.append({
+                "asn": asn_str,
+                "provider": provider,
+                "country": country,
+                "role": role,
+            })
+
+        return result
+
+    except Exception:
+        return []
+
+
+def _cymru_asn_name(asn):
+    """Lookup ASN name via Team Cymru DNS."""
+    import dns.resolver
+    try:
+        answers = dns.resolver.resolve(f"AS{asn}.asn.cymru.com", "TXT")
+        for r in answers:
+            txt = r.to_text().strip('"')
+            parts = [p.strip() for p in txt.split("|")]
+            if len(parts) >= 5:
+                return {"provider": parts[4], "country": parts[1]}
+    except Exception:
+        pass
+    return {}
 
 
 def _bulk_rdns(ips, timeout=3):
