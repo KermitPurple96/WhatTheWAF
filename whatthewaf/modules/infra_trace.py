@@ -882,13 +882,14 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     return result
 
 
-def _bulk_rdns(ips, timeout=2):
+def _bulk_rdns(ips, timeout=3):
     """Parallel reverse DNS lookup for a list of IPs."""
     import concurrent.futures
     import socket
 
     def _rdns(ip):
         try:
+            socket.setdefaulttimeout(timeout)
             host, _, _ = socket.gethostbyaddr(ip)
             return ip, host
         except Exception:
@@ -896,8 +897,20 @@ def _bulk_rdns(ips, timeout=2):
 
     result = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ips), 15)) as pool:
-        for ip, host in pool.map(_rdns, ips, timeout=timeout + 5):
-            result[ip] = host
+        futures = {pool.submit(_rdns, ip): ip for ip in ips}
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=timeout + 5):
+                ip = futures[f]
+                try:
+                    _, host = f.result()
+                    result[ip] = host
+                except Exception:
+                    result[ip] = ""
+        except TimeoutError:
+            for f, ip in futures.items():
+                if ip not in result:
+                    result[ip] = ""
+                    f.cancel()
     return result
 
 

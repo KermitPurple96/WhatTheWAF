@@ -2158,39 +2158,38 @@ def _run_trace(targets, args):
                 report["traceroute_direct"][ip] = tr_direct
                 _clear_status()
 
-        # Phase 5: subdomain takeover check
-        # Feed subdomains from scan history + recon into the takeover scanner
-        from .modules import subdomain_takeover
-        extra_subs = []
-        try:
-            from .modules.scan_persistence import ScanPersistence
-            db = ScanPersistence()
-            ip_stats = db.get_ip_stats(domain)
-            for s in ip_stats:
-                for src in s.sources:
-                    if src.startswith("subdomain:") or src.startswith("shodan:"):
-                        sub = src.split(":", 1)[1]
-                        if sub:
-                            extra_subs.append(sub)
-            db.close()
-        except Exception:
-            pass
+        # Phase 5-6: subdomain takeover + cache poisoning only with --waf-scan
+        if getattr(args, "waf_scan", False):
+            from .modules import subdomain_takeover
+            extra_subs = []
+            try:
+                from .modules.scan_persistence import ScanPersistence
+                db = ScanPersistence()
+                ip_stats = db.get_ip_stats(domain)
+                for s in ip_stats:
+                    for src in s.sources:
+                        if src.startswith("subdomain:") or src.startswith("shodan:"):
+                            sub = src.split(":", 1)[1]
+                            if sub:
+                                extra_subs.append(sub)
+                db.close()
+            except Exception:
+                pass
 
-        status_cb("trace", "Subdomain takeover check (CNAME + NS)")
-        sys.stderr.flush()
-        takeover = subdomain_takeover.scan_takeover(
-            domain, extra_subdomains=extra_subs,
-            timeout=min(args.timeout, 5), on_status=status_cb)
-        report["takeover"] = takeover
-        _clear_status()
+            status_cb("trace", "Subdomain takeover check (CNAME + NS)")
+            sys.stderr.flush()
+            takeover = subdomain_takeover.scan_takeover(
+                domain, extra_subdomains=extra_subs,
+                timeout=min(args.timeout, 5), on_status=status_cb)
+            report["takeover"] = takeover
+            _clear_status()
 
-        # Phase 6: cache poisoning test
-        from .modules.deep_scan import test_cache_poisoning
-        http_url = report.get("http", {}).get("url", f"https://{domain}")
-        status_cb("trace", "Cache poisoning tests")
-        sys.stderr.flush()
-        report["cache_poisoning"] = test_cache_poisoning(http_url, timeout=min(args.timeout, 5))
-        _clear_status()
+            from .modules.deep_scan import test_cache_poisoning
+            http_url = report.get("http", {}).get("url", f"https://{domain}")
+            status_cb("trace", "Cache poisoning tests")
+            sys.stderr.flush()
+            report["cache_poisoning"] = test_cache_poisoning(http_url, timeout=min(args.timeout, 5))
+            _clear_status()
 
         all_reports.append({"target": domain, "report": report})
 
