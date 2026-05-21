@@ -18,10 +18,10 @@ API keys config: `~/.config/whatthewaf/api_keys.conf` (auto-created on install, 
 ## Quick Start
 
 ```bash
-wtw example.com                        # Full scan
-wtw example.com --only waf             # WAF detection only
+wtw example.com                        # WAF detection + basic recon
+wtw example.com --tls                  # TLS/SSL audit (standalone)
+wtw example.com --tls --subs --cert    # Full scan with TLS, subs, and cert
 wtw example.com --trace                # Infrastructure chain + traceroute
-wtw example.com --tls                  # TLS/SSL audit (sslscan-like)
 wtw example.com --ip auto              # Auto-discover + test bypass
 wtw example.com --ip 1.2.3.0/24       # Test CIDR range
 wtw example.com --ip history           # Re-test stored IPs (no APIs)
@@ -33,6 +33,16 @@ wtw --whoami                           # Your current fingerprint
 wtw example.com --profile stealth      # Use a saved profile
 wtw example.com --json -o report.json  # JSON output
 ```
+
+All scan features are **opt-in** — only enable what you need:
+
+| Flag | What it adds |
+|------|-------------|
+| `--subs` | Subdomain leakage scan |
+| `--cert` | SSL certificate check |
+| `--tls` | TLS fingerprint analysis (standalone if alone) |
+| `--history` | Historical DNS records |
+| `--evasion` | WAF evasion analysis |
 
 ## Features
 
@@ -371,10 +381,13 @@ targets                  Domain(s), IP(s), or @file.txt
 --profile NAME           Load settings from saved profile
 --origins                Quick DNS + ASN classification
 
-# Analysis
+# Analysis (all opt-in)
 --only MODULES           Specific modules: waf, errors, tls, evasion, bypass, cert, subs, history, proxy
 --trace                  Infrastructure chain + network traceroute
---tls                    TLS/SSL audit
+--tls                    TLS/SSL audit (standalone, or add to full scan)
+--subs                   Subdomain leakage scan
+--cert                   SSL certificate check
+--history                Historical DNS records
 --evasion                WAF evasion analysis
 --waf-scan               Deep 10-layer WAF audit
 --waf-scan-layers L      Specific layers only

@@ -83,9 +83,9 @@ def _noop_status(*a, **kw):
     pass
 
 
-def full_scan(target, timeout=10, scan_subs=True, check_cert=True,
+def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
               check_history=False, user_agent=None, proxy=None, delay=0,
-              on_status=None, check_tls=True, check_evasion=False,
+              on_status=None, check_tls=False, check_evasion=False,
               proxy_chain=None, use_proton=False, only_modules=None):
     """Full WAF-focused scan.
 

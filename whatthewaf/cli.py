@@ -200,9 +200,8 @@ def main():
                         help="IP(s) to test for WAF bypass — single IP, comma-separated, CIDR range (1.2.3.0/24), 'auto', or 'history'")
     parser.add_argument("--path", metavar="PATH", default="/",
                         help="Path to test in --ip mode (default: /)")
-    parser.add_argument("--no-subs", action="store_true", help="Skip subdomain leakage scan")
-    parser.add_argument("--no-cert", action="store_true", help="Skip SSL certificate check")
-    parser.add_argument("--no-tls", action="store_true", help="Skip TLS fingerprint analysis")
+    parser.add_argument("--subs", action="store_true", help="Enable subdomain leakage scan")
+    parser.add_argument("--cert", action="store_true", help="Enable SSL certificate check")
     parser.add_argument("--history", action="store_true", help="Check historical DNS records")
     parser.add_argument("--evasion", action="store_true", help="Run WAF evasion analysis (UA, encoding, methods)")
     parser.add_argument("--trace", action="store_true", help="Trace infrastructure chain (CDN → proxy → origin) with full TLS audit")
@@ -426,7 +425,11 @@ def main():
         _run_purge_history(targets, args)
         return
 
-    if args.tls:
+    # --tls alone = standalone TLS audit; --tls with other flags = modifier for full scan
+    tls_standalone = args.tls and not (args.subs or args.cert or args.history or
+                                        args.evasion or args.trace or args.ip or
+                                        args.waf_scan)
+    if tls_standalone:
         _run_tls_audit(targets, args)
     elif args.proto_probe:
         _run_proto_probe(targets, args)
@@ -3574,11 +3577,12 @@ def _run_full(targets, args):
         if "waf" in only_modules:
             only_modules.add("errors")
 
+    # All features are opt-in: --subs, --cert, --tls, --history, --evasion
     scan_kwargs = dict(
-        timeout=args.timeout, scan_subs=not args.no_subs,
-        check_cert=not args.no_cert, check_history=args.history,
+        timeout=args.timeout, scan_subs=args.subs,
+        check_cert=args.cert, check_history=args.history,
         user_agent=args.user_agent, proxy=args.proxy, delay=args.delay,
-        on_status=status_cb, check_tls=not args.no_tls,
+        on_status=status_cb, check_tls=args.tls,
         check_evasion=args.evasion, proxy_chain=args.proxy_chain,
         use_proton=args.proton, only_modules=only_modules,
     )
