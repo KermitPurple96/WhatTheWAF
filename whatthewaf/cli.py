@@ -211,6 +211,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=10)
     parser.add_argument("--proxy", metavar="URL", help="HTTP/SOCKS proxy for all requests")
     parser.add_argument("--user-agent", metavar="UA")
+    parser.add_argument("--cookie", metavar="COOKIE", help="Cookie header value (e.g. 'session=abc; token=xyz')")
+    parser.add_argument("--header", "-H", metavar="HEADER", action="append",
+                        help="Extra header(s) in 'Name: Value' format (repeatable)")
     parser.add_argument("--delay", type=float, default=0)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("-q", "--quiet", action="store_true")
@@ -3791,6 +3794,15 @@ def _run_full(targets, args):
             only_modules.add("errors")
 
     # All features are opt-in: --subs, --cert, --tls, --history, --evasion
+    # Build extra headers from --cookie and --header
+    extra_headers = {}
+    if getattr(args, "cookie", None):
+        extra_headers["Cookie"] = args.cookie
+    for h in (getattr(args, "header", None) or []):
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+
     scan_kwargs = dict(
         timeout=args.timeout, scan_subs=args.subs,
         check_cert=args.cert, check_history=args.history,
@@ -3798,6 +3810,7 @@ def _run_full(targets, args):
         on_status=status_cb, check_tls=args.tls,
         check_evasion=args.evasion, proxy_chain=args.proxy_chain,
         use_proton=args.proton, only_modules=only_modules,
+        extra_headers=extra_headers or None,
     )
 
     if args.workers > 1 and len(targets) > 1:

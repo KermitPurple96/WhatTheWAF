@@ -11,7 +11,7 @@ from .modules import (
 from .constants import DEFAULT_UA
 
 
-def fetch_response(url, timeout=10, user_agent=None, proxy=None):
+def fetch_response(url, timeout=10, user_agent=None, proxy=None, extra_headers=None):
     try:
         # Use browser-ordered headers if a profile is active
         try:
@@ -22,6 +22,9 @@ def fetch_response(url, timeout=10, user_agent=None, proxy=None):
                 req_headers = {"User-Agent": user_agent or DEFAULT_UA}
         except Exception:
             req_headers = {"User-Agent": user_agent or DEFAULT_UA}
+
+        if extra_headers:
+            req_headers.update(extra_headers)
 
         client_kwargs = {
             "timeout": timeout, "follow_redirects": True, "verify": False,
@@ -86,7 +89,8 @@ def _noop_status(*a, **kw):
 def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
               check_history=False, user_agent=None, proxy=None, delay=0,
               on_status=None, check_tls=False, check_evasion=False,
-              proxy_chain=None, use_proton=False, only_modules=None):
+              proxy_chain=None, use_proton=False, only_modules=None,
+              extra_headers=None):
     """Full WAF-focused scan.
 
     only_modules: if set, only run these modules. Valid values:
@@ -139,7 +143,7 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
     # 3. HTTP fetch + WAF detection
     if _should_run("waf") or _should_run("errors") or _should_run("bypass") or _should_run("evasion") or only_modules is None:
         status("http", f"Fetching {url}")
-        resp = fetch_response(url, timeout=timeout, user_agent=user_agent, proxy=proxy)
+        resp = fetch_response(url, timeout=timeout, user_agent=user_agent, proxy=proxy, extra_headers=extra_headers)
         if "error" not in resp:
             report["http"] = {
                 "status": resp["status"],

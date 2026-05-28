@@ -1,4 +1,4 @@
-# WhatTheWAF v3.2.0
+# WhatTheWAF v3.3.0
 
 WAF/CDN Detection | Infrastructure Tracing | WAF Bypass | TLS/SSL Audit | Origin Discovery
 
@@ -29,6 +29,7 @@ wtw example.com --evasion              # Quick WAF evasion recon
 wtw example.com --waf-scan --proton    # Deep WAF audit (use VPN)
 wtw example.com --scan-history         # View stored intelligence
 wtw example.com --origins              # Quick DNS + ASN classification
+wtw example.com --vecino               # Reverse IP neighbours + hosting type (shared/VPS/SaaS)
 wtw --whoami                           # Your current fingerprint
 wtw example.com --profile stealth      # Use a saved profile
 wtw example.com --json -o report.json  # JSON output
@@ -151,6 +152,46 @@ Tests what the WAF inspects: User-Agent filtering, HTTP method restrictions, enc
 ### Scan Persistence
 
 All scans auto-store WAF detections, IPs, and findings in SQLite (`~/.local/share/whatthewaf/scan_history.db`). View with `--scan-history`, re-test IPs with `--ip history`, clear with `--purge-history`.
+
+### `--vecino` — Reverse IP Neighbours + Hosting Classification
+
+Combines reverse IP lookup (PTR, HackerTarget, RapidDNS) with SSL certificate analysis to classify hosting type. The cert technique compares the TLS certificate served **with and without SNI** — if both return the same cert, it's a single-tenant server (VPS/dedicated); if they differ, it's multi-tenant (shared hosting).
+
+```
+── SSL Certificate Hosting Classification ──
+  Type:       SHARED_HOSTING  (confidence: high)
+  Cert (no SNI):   *.stackcp.com   issuer: DigiCert Inc  SANs: 2
+  Cert (with SNI): www.example.com issuer: DigiCert Inc  SANs: 2
+  → Default cert matches platform: StackCP (20i) (*.stackcp.com)
+
+── Reverse IP Neighbours ──
+  Domains found: 598  (PTR: 1, HackerTarget: 500, RapidDNS: 100)
+  Hosting type:  SHARED
+
+── Verdict ──
+  SHARED_HOSTING  (based on: SSL cert analysis)
+```
+
+Detects 25+ known platforms (StackCP, Cloudflare, Vercel, Shopify, Heroku, Azure App Service, cPanel, Plesk, etc.) by matching default certificate patterns. Also integrated into regular `--cert` scans.
+
+```bash
+wtw example.com --vecino                # Domain → resolve → classify
+wtw 1.2.3.4 --vecino                    # Direct IP
+wtw example.com --vecino --json         # JSON output
+```
+
+### `--cookie` / `-H` — Authenticated Scanning
+
+Pass session cookies and custom headers to scan behind login walls:
+
+```bash
+wtw https://app.example.com/dashboard \
+  --cookie 'session=abc123; csrf=xyz' \
+  -H "Authorization: Bearer eyJ..." \
+  -H "X-Custom: value"
+```
+
+All headers are sent with every request (WAF detection, error probes, evasion tests). Useful for testing WAF behavior on authenticated endpoints.
 
 ### `--recon` — Full OSINT
 
@@ -404,6 +445,7 @@ targets                  Domain(s), IP(s), or @file.txt
 -l, --list FILE          Read from file
 --profile NAME           Load settings from saved profile
 --origins                Quick DNS + ASN classification
+--vecino                 Reverse IP neighbours + hosting type (shared/VPS/SaaS)
 
 # Analysis (all opt-in)
 --only MODULES           Specific modules: waf, errors, tls, evasion, bypass, cert, subs, history, proxy
@@ -483,6 +525,8 @@ targets                  Domain(s), IP(s), or @file.txt
 
 # Tuning
 --user-agent UA          Custom UA
+--cookie COOKIE          Cookie header (e.g. 'session=abc; token=xyz')
+-H, --header HEADER      Extra header (repeatable, 'Name: Value')
 --timeout SECS           Timeout (default: 10)
 --delay SECS             Delay between targets
 --workers N              Concurrent workers
