@@ -208,6 +208,186 @@ def check_ssl_cert(ip, hostname, timeout=5):
         return None
 
 
+# ── Known SaaS/PaaS platform cert patterns ─────────────────────
+SAAS_CERT_PATTERNS = [
+    # CDN / Shared hosting platforms
+    (r"\*\.stackcp\.com", "StackCP (20i)", "SHARED_HOSTING"),
+    (r"\*\.stackcp\.net", "StackCP (20i)", "SHARED_HOSTING"),
+    (r"\*\.wpengine\.com", "WP Engine", "MANAGED_HOSTING"),
+    (r"\*\.kinsta\.cloud", "Kinsta", "MANAGED_HOSTING"),
+    (r"\*\.pantheonsite\.io", "Pantheon", "MANAGED_HOSTING"),
+    (r"\*\.flywheel\.network", "Flywheel", "MANAGED_HOSTING"),
+    (r"\*\.netlify\.app", "Netlify", "SAAS"),
+    (r"\*\.vercel\.app", "Vercel", "SAAS"),
+    (r"\*\.herokuapp\.com", "Heroku", "SAAS"),
+    (r"\*\.azurewebsites\.net", "Azure App Service", "SAAS"),
+    (r"\*\.cloudfront\.net", "CloudFront", "CDN"),
+    (r"\*\.fastly\.net", "Fastly", "CDN"),
+    (r"sni\.cloudflaressl\.com", "Cloudflare", "CDN"),
+    (r"\*\.shopify\.com", "Shopify", "SAAS"),
+    (r"\*\.squarespace\.com", "Squarespace", "SAAS"),
+    (r"\*\.wixsite\.com", "Wix", "SAAS"),
+    (r"\*\.godaddysites\.com", "GoDaddy Website Builder", "SAAS"),
+    (r"\*\.github\.io", "GitHub Pages", "SAAS"),
+    (r"\*\.gitlab\.io", "GitLab Pages", "SAAS"),
+    # Shared hosting panels
+    (r"\*\.secureserver\.net", "GoDaddy Shared", "SHARED_HOSTING"),
+    (r"\*\.bluehost\.com", "Bluehost Shared", "SHARED_HOSTING"),
+    (r"\*\.hostgator\.com", "HostGator Shared", "SHARED_HOSTING"),
+    (r"\*\.siteground\.net", "SiteGround", "SHARED_HOSTING"),
+    (r"\*\.hostinger\.com", "Hostinger", "SHARED_HOSTING"),
+    (r"\*\.dreamhost\.com", "DreamHost", "SHARED_HOSTING"),
+    (r"cPanel,?\s*Inc", "cPanel Shared Hosting", "SHARED_HOSTING"),
+    (r"Plesk", "Plesk Shared Hosting", "SHARED_HOSTING"),
+]
+
+
+def classify_hosting_by_cert(ip, hostname, timeout=5):
+    """Classify hosting type by comparing SSL certs with and without SNI.
+
+    Logic:
+    - No SNI cert = provider default cert → SHARED HOSTING (multi-tenant)
+    - No SNI cert = same as SNI cert → VPS/DEDICATED (single-tenant)
+    - No SNI cert matches known SaaS pattern → SaaS/PaaS
+    - SNI cert covers many unrelated SANs → SHARED HOSTING
+    """
+    result = {
+        "cert_no_sni": None,
+        "cert_with_sni": None,
+        "hosting_type": "UNKNOWN",
+        "confidence": "low",
+        "signals": [],
+    }
+
+    def _get_cert(sni_hostname=None):
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((ip, 443), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=sni_hostname) as ssock:
+                    der_cert = ssock.getpeercert(binary_form=True)
+                    if not der_cert:
+                        return None
+                    cert = x509.load_der_x509_certificate(der_cert)
+                    cn = ""
+                    try:
+                        cn_attr = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+                        if cn_attr:
+                            cn = cn_attr[0].value
+                    except Exception:
+                        pass
+                    issuer_org = ""
+                    try:
+                        org_attr = cert.issuer.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+                        if org_attr:
+                            issuer_org = org_attr[0].value
+                    except Exception:
+                        pass
+                    issuer_cn = ""
+                    try:
+                        icn_attr = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+                        if icn_attr:
+                            issuer_cn = icn_attr[0].value
+                    except Exception:
+                        pass
+                    alt_names = []
+                    try:
+                        san_ext = cert.extensions.get_extension_for_class(
+                            x509.SubjectAlternativeName
+                        )
+                        alt_names = san_ext.value.get_values_for_type(x509.DNSName)
+                    except Exception:
+                        pass
+                    return {
+                        "cn": cn,
+                        "issuer": issuer_org,
+                        "issuer_cn": issuer_cn,
+                        "alt_names": alt_names,
+                        "san_count": len(alt_names),
+                    }
+        except Exception:
+            return None
+
+    # Fetch both certs in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_no_sni = pool.submit(_get_cert, None)
+        f_with_sni = pool.submit(_get_cert, hostname)
+        cert_no_sni = f_no_sni.result(timeout=timeout + 2)
+        cert_with_sni = f_with_sni.result(timeout=timeout + 2)
+
+    result["cert_no_sni"] = cert_no_sni
+    result["cert_with_sni"] = cert_with_sni
+
+    if not cert_no_sni and not cert_with_sni:
+        result["signals"].append("No SSL certificate on port 443")
+        return result
+
+    # --- Check if no-SNI cert matches a known SaaS/platform pattern ---
+    if cert_no_sni:
+        no_sni_cn = cert_no_sni.get("cn", "")
+        no_sni_issuer = f"{cert_no_sni.get('issuer', '')} {cert_no_sni.get('issuer_cn', '')}"
+        for pattern, platform, ptype in SAAS_CERT_PATTERNS:
+            if re.search(pattern, no_sni_cn, re.IGNORECASE) or \
+               re.search(pattern, no_sni_issuer, re.IGNORECASE) or \
+               any(re.search(pattern, san, re.IGNORECASE) for san in cert_no_sni.get("alt_names", [])):
+                result["hosting_type"] = ptype
+                result["confidence"] = "high"
+                result["signals"].append(f"Default cert matches platform: {platform} ({no_sni_cn})")
+                return result
+
+    # --- Compare certs with and without SNI ---
+    if cert_no_sni and cert_with_sni:
+        same_cert = cert_no_sni["cn"] == cert_with_sni["cn"]
+
+        if same_cert:
+            # Same cert with and without SNI = only one tenant = VPS/dedicated
+            result["signals"].append(
+                f"Same cert with/without SNI: {cert_no_sni['cn']} → single tenant"
+            )
+            result["hosting_type"] = "VPS/DEDICATED"
+            result["confidence"] = "high"
+        else:
+            # Different certs = SNI-based routing = multi-tenant = shared hosting
+            result["signals"].append(
+                f"Different cert without SNI: {cert_no_sni['cn']} (default) vs {cert_with_sni['cn']} (SNI)"
+            )
+            result["hosting_type"] = "SHARED_HOSTING"
+            result["confidence"] = "high"
+
+    elif cert_with_sni and not cert_no_sni:
+        result["signals"].append("No default cert (SNI required) → likely shared/CDN")
+        result["hosting_type"] = "SHARED_HOSTING"
+        result["confidence"] = "medium"
+
+    # --- Check SAN count on the cert that matches the hostname ---
+    active_cert = cert_with_sni or cert_no_sni
+    if active_cert:
+        san_count = active_cert.get("san_count", 0)
+        alt_names = active_cert.get("alt_names", [])
+
+        # Count unrelated domains in SANs (different base domain)
+        if hostname:
+            base = ".".join(hostname.rsplit(".", 2)[-2:])
+            unrelated = [n for n in alt_names if not n.endswith(base) and not n.startswith("*")]
+            if unrelated:
+                result["signals"].append(
+                    f"Cert has {len(unrelated)} unrelated domain(s) in SANs → shared hosting"
+                )
+                if result["hosting_type"] == "UNKNOWN":
+                    result["hosting_type"] = "SHARED_HOSTING"
+                    result["confidence"] = "medium"
+
+        if san_count > 20:
+            result["signals"].append(f"Cert covers {san_count} SANs → shared hosting")
+            result["hosting_type"] = "SHARED_HOSTING"
+            result["confidence"] = "high"
+        elif san_count <= 2:
+            result["signals"].append(f"Cert covers {san_count} SAN(s) → dedicated/VPS")
+
+    return result
+
+
 def fetch_historical_ips(domain, timeout=10):
     """Query ViewDNS.info + SecurityTrails for historical IP records.
 

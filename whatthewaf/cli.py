@@ -318,6 +318,8 @@ def main():
                         help="Whoxy WHOIS + reverse WHOIS to find sibling domains and shared IPs")
     parser.add_argument("--dnstrails", action="store_true",
                         help="DNSTrails historical DNS records and subdomain enumeration")
+    parser.add_argument("--vecino", action="store_true",
+                        help="Reverse IP neighbours + hosting type classification (shared/VPS/SaaS)")
     parser.add_argument("--recon", action="store_true",
                         help="Run all OSINT sources, correlate results, and classify IPs")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
@@ -407,6 +409,12 @@ def main():
                       args.dnstrails])
     if osint_mode:
         _run_osint(targets, args)
+        return
+
+    if args.vecino:
+        if not targets:
+            parser.error("--vecino requires at least one target.")
+        _run_vecino(targets, args)
         return
 
     if args.recon:
@@ -2900,6 +2908,160 @@ def _collect_targets(args):
     return targets
 
 
+def _run_vecino(targets, args):
+    """Run reverse IP neighbours + SSL cert hosting classification."""
+    try:
+        import importlib.util
+        for candidate in [
+            os.path.expanduser("~/BB_tools/vecino.py"),
+            os.path.join(os.environ.get("BB_TOOLS", ""), "vecino.py"),
+        ]:
+            if os.path.isfile(candidate):
+                vecino_path = candidate
+                break
+        else:
+            raise FileNotFoundError("vecino.py not found")
+        spec = importlib.util.spec_from_file_location("vecino", vecino_path)
+        vecino = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(vecino)
+    except Exception as e:
+        print(f"{RED}[!] Could not load vecino.py: {e}{RESET}", file=sys.stderr)
+        print(f"{DIM}    Expected at ~/BB_tools/vecino.py{RESET}", file=sys.stderr)
+        return
+
+    from .modules import dns_resolver, origin_finder
+
+    is_json = args.json
+    all_results = []
+
+    for target in targets:
+        domain = dns_resolver._clean_domain(target)
+
+        # Resolve to IP
+        ip, hostname = vecino.resolve_to_ip(target)
+        if not ip:
+            print(f"{RED}[!] Could not resolve {target}{RESET}", file=sys.stderr)
+            continue
+
+        if not is_json:
+            W = max(len(domain) + 20, 60)
+            print(f"\n{BOLD}{CYAN}{'=' * W}{RESET}")
+            print(f"{BOLD}{CYAN}  Vecino + Cert Analysis: {domain} ({ip}){RESET}")
+            print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
+
+        # 1. SSL cert hosting classification
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [~] SSL cert inspection (with/without SNI)...{RESET}")
+            sys.stderr.flush()
+        cert_class = origin_finder.classify_hosting_by_cert(ip, domain)
+        if not is_json:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+
+        # 2. Vecino neighbour scan
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [~] Reverse IP neighbours...{RESET}")
+            sys.stderr.flush()
+        neighbours = vecino.scan_neighbours(ip, hostname=hostname)
+        if not is_json:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+
+        combined = {
+            "target": target, "domain": domain, "ip": ip,
+            "cert_classification": cert_class,
+            "neighbours": neighbours,
+        }
+        all_results.append(combined)
+
+        if not is_json:
+            # ── Cert Classification ──
+            _section("SSL Certificate Hosting Classification", MAGENTA)
+            ct = cert_class.get("hosting_type", "UNKNOWN")
+            conf = cert_class.get("confidence", "low")
+            type_color = {
+                "VPS/DEDICATED": GREEN, "SHARED_HOSTING": YELLOW,
+                "SAAS": CYAN, "MANAGED_HOSTING": CYAN, "CDN": RED,
+            }.get(ct, DIM)
+            _line(f"Type:       {type_color}{BOLD}{ct}{RESET}  (confidence: {conf})")
+
+            cert_no = cert_class.get("cert_no_sni")
+            cert_sni = cert_class.get("cert_with_sni")
+            if cert_no:
+                _line(f"Cert (no SNI):   {BOLD}{cert_no['cn']}{RESET}  issuer: {cert_no.get('issuer', '?')}  SANs: {cert_no.get('san_count', '?')}")
+            else:
+                _line(f"Cert (no SNI):   {DIM}none / connection failed{RESET}")
+            if cert_sni:
+                _line(f"Cert (with SNI): {BOLD}{cert_sni['cn']}{RESET}  issuer: {cert_sni.get('issuer', '?')}  SANs: {cert_sni.get('san_count', '?')}")
+            else:
+                _line(f"Cert (with SNI): {DIM}none / connection failed{RESET}")
+
+            for sig in cert_class.get("signals", []):
+                _line(f"{DIM}→ {sig}{RESET}")
+
+            # ── Neighbours ──
+            _section("Reverse IP Neighbours", BLUE)
+            n = neighbours
+            _line(f"Domains found: {BOLD}{n['domain_count']}{RESET}  "
+                  f"(PTR: {n['sources'].get('ptr', 0)}, HackerTarget: {n['sources'].get('hackertarget', 0)}, "
+                  f"RapidDNS: {n['sources'].get('rapiddns', 0)})")
+            _line(f"Provider:      {n.get('provider', '?')}")
+            _line(f"Hosting type:  {BOLD}{n.get('hosting_type', '?')}{RESET}")
+
+            if n.get("panels"):
+                panels_str = ", ".join(f"{k}:{v}" for k, v in n["panels"].items()) if isinstance(n["panels"], dict) else str(n["panels"])
+                _line(f"Panels:        {RED}{panels_str}{RESET}")
+
+            if n.get("domains"):
+                shown = n["domains"][:20]
+                _line(f"\n{BOLD}  Domains on same IP:{RESET}")
+                for d in shown:
+                    _line(f"  {DIM}•{RESET} {d}")
+                if len(n["domains"]) > 20:
+                    _line(f"  {DIM}... and {len(n['domains']) - 20} more{RESET}")
+
+            # ── Combined verdict ──
+            _section("Verdict", GREEN)
+            vecino_type = n.get("hosting_type", "UNKNOWN")
+            cert_type = cert_class.get("hosting_type", "UNKNOWN")
+            cert_conf = cert_class.get("confidence", "low")
+
+            # Cert analysis with high confidence takes priority
+            if cert_conf == "high" and cert_type != "UNKNOWN":
+                verdict = cert_type
+                if vecino_type != "UNKNOWN" and vecino_type.replace("VPS/DEDICATED", "VPS") != cert_type.replace("VPS/DEDICATED", "VPS"):
+                    verdict_source = f"SSL cert analysis (vecino says {vecino_type} but cert overrides)"
+                else:
+                    verdict_source = "SSL cert analysis"
+            elif cert_type in ("SHARED_HOSTING", "SAAS", "MANAGED_HOSTING", "CDN"):
+                verdict = cert_type
+                verdict_source = "SSL cert analysis"
+            elif vecino_type == "SHARED" and n.get("domain_count", 0) > 5:
+                verdict = "SHARED_HOSTING"
+                verdict_source = "reverse IP neighbours"
+            elif cert_type == "VPS/DEDICATED":
+                verdict = "VPS/DEDICATED"
+                verdict_source = "SSL cert analysis"
+            elif vecino_type != "UNKNOWN":
+                verdict = vecino_type
+                verdict_source = "reverse IP neighbours"
+            else:
+                verdict = "UNKNOWN"
+                verdict_source = "insufficient data"
+
+            verdict_color = {
+                "VPS/DEDICATED": GREEN, "SHARED_HOSTING": YELLOW, "SHARED": YELLOW,
+                "SAAS": CYAN, "MANAGED_HOSTING": CYAN, "CDN": RED,
+            }.get(verdict, DIM)
+            _line(f"{verdict_color}{BOLD}{verdict}{RESET}  (based on: {verdict_source})")
+            print()
+
+    if is_json:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+
+
 def _run_origins(targets, args):
     rows = origins_scan(targets)
     if args.json:
@@ -3899,6 +4061,26 @@ def _print_report(report):
         _line(f"Issuer: {cert.get('issuer', '?')}")
         if cert.get("is_cdn_issued"):
             _line(f"{YELLOW}⚠ Certificate issued by CDN provider{RESET}")
+
+    # Cert Hosting Classification
+    cert_h = report.get("cert_hosting")
+    if cert_h and cert_h.get("hosting_type", "UNKNOWN") != "UNKNOWN":
+        ct = cert_h["hosting_type"]
+        conf = cert_h.get("confidence", "low")
+        type_color = {
+            "VPS/DEDICATED": GREEN, "SHARED_HOSTING": YELLOW,
+            "SAAS": CYAN, "MANAGED_HOSTING": CYAN, "CDN": RED,
+        }.get(ct, DIM)
+        _section("Hosting Type (cert analysis)", MAGENTA)
+        _line(f"Type: {type_color}{BOLD}{ct}{RESET}  (confidence: {conf})")
+        cert_no = cert_h.get("cert_no_sni")
+        cert_sni = cert_h.get("cert_with_sni")
+        if cert_no:
+            _line(f"Default cert (no SNI): {cert_no['cn']}")
+        if cert_sni:
+            _line(f"SNI cert:              {cert_sni['cn']}")
+        for sig in cert_h.get("signals", []):
+            _line(f"{DIM}→ {sig}{RESET}")
 
     # Origin candidates
     if report.get("origin_candidates"):

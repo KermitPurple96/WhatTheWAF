@@ -224,6 +224,8 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
     if _should_run("cert") and check_cert and a_records:
         status("cert", f"SSL certificate for {domain}")
         report["cert_info"] = origin_finder.check_ssl_cert(a_records[0], domain, timeout=timeout)
+        status("cert", f"SSL cert hosting classification for {domain}")
+        report["cert_hosting"] = origin_finder.classify_hosting_by_cert(a_records[0], domain, timeout=timeout)
 
     # 9. Origin discovery
     if _should_run("subs") and scan_subs and report["cdn_detected"]:
