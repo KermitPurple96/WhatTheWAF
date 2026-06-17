@@ -4160,31 +4160,33 @@ def _line(text):
 def _waf_active_analysis(report):
     """Analyze error page probes to determine if WAF is actively blocking attacks.
 
-    Returns (blocked, passed) for attack payloads only (trigger == "waf").
+    Returns (blocked, passed, redirected) for attack payloads only (trigger == "waf").
+    - blocked: 403/406/429/etc — WAF or server explicitly rejected the payload
+    - passed: 200 — payload went through without filtering
+    - redirected: 301/302/307/308 — ambiguous, payload may or may not have been processed
     """
     ep = report.get("error_pages", {})
     ep_probes = ep.get("probes", [])
     blocked = []
     passed = []
+    redirected = []
     waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
+    redirect_statuses = {301, 302, 307, 308}
 
     for p in ep_probes:
         if p.get("error") or p.get("trigger") != "waf":
             continue
         status = p.get("status", 0)
-        has_waf_hit = bool(p.get("waf_hits"))
-        # Only blocking status codes count. WAF hit on 200/301/302 just means
-        # the WAF/CDN is present in headers, not that it blocked the request.
-        # 301/302 = redirect (server didn't block, just redirected)
-        is_blocked = status in waf_trigger_statuses
         entry = {"path": p["path"], "description": p["description"],
                  "status": status, "waf_hits": p.get("waf_hits", [])}
-        if is_blocked:
+        if status in waf_trigger_statuses:
             blocked.append(entry)
+        elif status in redirect_statuses:
+            redirected.append(entry)
         else:
             passed.append(entry)
 
-    return blocked, passed
+    return blocked, passed, redirected
 
 
 # Attack categories for gap analysis
@@ -4234,22 +4236,27 @@ def _print_report(report):
             if prov not in cdn_names:
                 cdn_names.append(prov)
 
-    blocked, passed = _waf_active_analysis(report)
+    blocked, passed, redirected = _waf_active_analysis(report)
+    total_probes = len(blocked) + len(passed) + len(redirected)
 
     _section("WAF Status", CYAN)
     if real_wafs:
         _line(f"{RED}[+] WAF Detected:{RESET} {BOLD}{', '.join(real_wafs)}{RESET}")
         if blocked:
-            _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{len(blocked)+len(passed)} attack payloads")
+            _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{total_probes} attack payloads")
             for b in blocked:
                 waf_str = f" ({', '.join(b['waf_hits'])})" if b["waf_hits"] else ""
-                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}{waf_str}")
+                _line(f"    {RED}BLOCKED{RESET}    [{b['status']}] {b['description']}{waf_str}")
+            for r in redirected:
+                _line(f"    {DIM}REDIRECT{RESET}   [{r['status']}] {r['description']} {DIM}(inconclusive){RESET}")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
         elif passed:
             _line(f"{YELLOW}[!] WAF Active:{RESET}   {YELLOW}NO{RESET} — detected but {BOLD}not blocking{RESET} attack payloads")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
+            for r in redirected:
+                _line(f"    {DIM}REDIRECT{RESET}   [{r['status']}] {r['description']}{RESET}")
         else:
             _line(f"{DIM}[?] WAF Active:   Unknown (no probe results){RESET}")
     elif server_hardening:
@@ -4257,36 +4264,40 @@ def _print_report(report):
         _line(f"{YELLOW}[~] WAF Detected:{RESET} {BOLD}No{RESET}")
         _line(f"{YELLOW}[~] Server Hardening:{RESET} {BOLD}{', '.join(server_hardening)}{RESET} — {DIM}not a WAF, just server config (e.g. Deny rules in .htaccess){RESET}")
         if blocked:
-            _line(f"{YELLOW}[~] Blocking:{RESET}     {len(blocked)}/{len(blocked)+len(passed)} attack payloads — {DIM}likely mod_rewrite/mod_security basic rules, not a full WAF{RESET}")
+            _line(f"{YELLOW}[~] Blocking:{RESET}     {len(blocked)}/{total_probes} attack payloads — {DIM}likely mod_rewrite/mod_security basic rules, not a full WAF{RESET}")
             for b in blocked:
                 waf_str = f" ({', '.join(b['waf_hits'])})" if b["waf_hits"] else ""
-                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}{waf_str}")
+                _line(f"    {RED}BLOCKED{RESET}    [{b['status']}] {b['description']}{waf_str}")
+            for r in redirected:
+                _line(f"    {DIM}REDIRECT{RESET}   [{r['status']}] {r['description']}{RESET}")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
         elif passed:
             _line(f"{YELLOW}[~] Blocking:{RESET}     {YELLOW}NONE{RESET} — {BOLD}no attack payloads blocked{RESET}")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
     else:
         # No WAF signature, no server hardening detected
         plat = report.get("platform", {})
         if blocked and plat.get("is_saas"):
-            # SaaS platform blocking some attacks — this is platform-level protection, not a WAF
             pname = plat.get("platform_name", "Platform")
             _line(f"{YELLOW}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
-            _line(f"{YELLOW}[~] Platform Blocking:{RESET} {BOLD}{pname}{RESET} blocks {len(blocked)}/{len(blocked)+len(passed)} payloads — {DIM}built-in platform protection, not a configurable WAF{RESET}")
+            _line(f"{YELLOW}[~] Platform Blocking:{RESET} {BOLD}{pname}{RESET} blocks {len(blocked)}/{total_probes} payloads — {DIM}built-in platform protection, not a configurable WAF{RESET}")
             for b in blocked:
-                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']} {DIM}({pname}){RESET}")
+                _line(f"    {RED}BLOCKED{RESET}    [{b['status']}] {b['description']} {DIM}({pname}){RESET}")
+            for r in redirected:
+                _line(f"    {DIM}REDIRECT{RESET}   [{r['status']}] {r['description']}{RESET}")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
         elif blocked:
-            # Blocks exist but no WAF signature — server itself is blocking
             _line(f"{YELLOW}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
-            _line(f"{YELLOW}[~] Server Blocking:{RESET} {len(blocked)}/{len(blocked)+len(passed)} payloads blocked — {DIM}server-level input validation, not a WAF{RESET}")
+            _line(f"{YELLOW}[~] Server Blocking:{RESET} {len(blocked)}/{total_probes} payloads blocked — {DIM}server-level input validation, not a WAF{RESET}")
             for b in blocked:
-                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']} {DIM}(server){RESET}")
+                _line(f"    {RED}BLOCKED{RESET}    [{b['status']}] {b['description']} {DIM}(server){RESET}")
+            for r in redirected:
+                _line(f"    {DIM}REDIRECT{RESET}   [{r['status']}] {r['description']}{RESET}")
             for p in passed:
-                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+                _line(f"    {YELLOW}PASSED{RESET}     [{p['status']}] {p['description']}")
         else:
             _line(f"{GREEN}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
             if passed:
@@ -4294,7 +4305,8 @@ def _print_report(report):
             else:
                 _line(f"{GREEN}[-] WAF Active:{RESET}   {BOLD}No{RESET}")
 
-    # Protection gap analysis — highlight unprotected critical categories
+    # Protection gap analysis — only flag categories where payload clearly PASSED (200)
+    # Redirects (301/302) are inconclusive — the payload may not have reached the app
     if blocked or passed:
         passed_cats = []
         blocked_cats = []
