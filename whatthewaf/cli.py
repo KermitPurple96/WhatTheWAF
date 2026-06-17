@@ -4170,7 +4170,7 @@ def _waf_active_analysis(report):
     blocked = []
     passed = []
     redirected = []
-    waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
+    waf_trigger_statuses = {400, 403, 406, 429, 451, 493, 503}
     redirect_statuses = {301, 302, 307, 308}
 
     for p in ep_probes:
@@ -4426,7 +4426,7 @@ def _print_report(report):
             _line(f"{DIM}Real attack payloads — 403 = WAF blocked, 200 = passed through{RESET}")
             for p in attack_probes:
                 st = p.get("status", "?")
-                waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
+                waf_trigger_statuses = {400, 403, 406, 429, 451, 493, 503}
                 has_waf_hit = bool(p.get("waf_hits"))
                 is_blocked = st in waf_trigger_statuses or (has_waf_hit and st not in (200, 201, 301, 302))
 
