@@ -499,12 +499,18 @@ def _detect_error_server(status, headers, body):
     elif re.search(r"<hr><center>nginx</center>", body_lower):
         detections.append(("Nginx", "", "error page"))
 
-    # IIS error page signatures
-    if "iis" in body_lower or "internet information services" in body_lower:
+    # IIS error page signatures — use specific patterns to avoid false positives
+    # (e.g. "iis" as substring in base64/encoded content)
+    if re.search(r"microsoft-iis/([\d.]+)", body_lower):
         m = re.search(r"microsoft-iis/([\d.]+)", body_lower)
+        detections.append(("Microsoft IIS", m.group(1), "error page"))
+    elif "internet information services" in body_lower:
+        m = re.search(r"internet information services.*([\d.]+)", body_lower)
         ver = m.group(1) if m else ""
         detections.append(("Microsoft IIS", ver, "error page"))
-    if "detailed error" in body_lower and "iis" in body_lower:
+    elif re.search(r"<title>.*iis\b.*error", body_lower):
+        detections.append(("Microsoft IIS", "", "error page title"))
+    if "detailed error" in body_lower and re.search(r"\biis\b", body_lower):
         detections.append(("Microsoft IIS", "", "detailed error page"))
 
     # LiteSpeed
@@ -574,6 +580,10 @@ def _detect_error_server(status, headers, body):
         m = re.search(r"openresty/([\d.]+)", body_lower)
         ver = m.group(1) if m else ""
         detections.append(("OpenResty", ver, "error page"))
+
+    # Cato Networks SASE (corporate proxy/VPN that intercepts traffic)
+    if "cato_variables" in body_lower or "cato networks" in body_lower:
+        detections.append(("Cato Networks SASE", "", "block page"))
 
     return detections
 
