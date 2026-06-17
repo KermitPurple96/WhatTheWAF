@@ -589,10 +589,11 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         if evidence:
             key = tech_name
-            # If we already have this tech, merge evidence and take max confidence
+            # If we already have this tech, merge evidence (dedup) and take max confidence
             if key in detections:
                 detections[key]["confidence"] = max(detections[key]["confidence"], min(score, 1.0))
-                detections[key]["evidence"].extend(evidence)
+                existing = set(detections[key]["evidence"])
+                detections[key]["evidence"].extend(e for e in evidence if e not in existing)
             else:
                 detections[key] = {
                     "name": tech_name,
@@ -640,17 +641,23 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
             "evidence": [f"server:{server_hdr}"],
         }
 
-    # ─── X-Backend / X-Upstream headers (reveal backend server behind proxy) ───
+    # ─── X-Backend / X-Upstream headers (add as evidence to existing server detection) ───
     for backend_hdr in ("x-backend", "x-upstream", "x-served-by-backend",
                          "x-origin-server", "x-real-server"):
         val = _hdr(headers, backend_hdr) or error_headers_all.get(backend_hdr, "")
-        if val and val not in detections:
-            detections[f"backend:{val}"] = {
-                "name": val,
-                "layer": "server",
-                "confidence": 0.4,
-                "evidence": [f"header:{backend_hdr}={val}"],
-            }
+        if val:
+            # Add as evidence to existing server-layer detection (don't create separate layer)
+            server_dets = [k for k, d in detections.items() if d["layer"] == "server"]
+            if server_dets:
+                detections[server_dets[0]]["evidence"].append(f"backend:{backend_hdr}={val}")
+            else:
+                # No server detected yet — show as standalone info
+                detections[f"backend:{val}"] = {
+                    "name": val,
+                    "layer": "server",
+                    "confidence": 0.3,
+                    "evidence": [f"header:{backend_hdr}={val}"],
+                }
 
     # ─── Hosting from ASN (if no hosting layer detected) ───
     has_hosting = any(d["layer"] == "hosting" for d in detections.values())
