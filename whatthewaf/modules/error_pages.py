@@ -17,56 +17,170 @@ from ..constants import DEFAULT_UA
 # (path, description, expected_trigger, relevant_tech)
 # relevant_tech: None = always probe, set = only if detected tech matches
 PROBES = [
-    # --- Generic 404 triggers (always) ---
+    # ── Generic (always) ──
     ("/thispagedoesnotexist-wtw7x2q", "Non-existent path", "404", None),
-
-    # --- Technology-specific 404 triggers ---
-    ("/WTW-404-test.php", "Non-existent PHP file", "404", {"apache", "nginx", "litespeed", "php", "openresty"}),
-    ("/WTW-404-test.asp", "Non-existent ASP file", "404", {"iis", "asp.net"}),
-    ("/WTW-404-test.jsp", "Non-existent JSP file", "404", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty"}),
-
-    # --- Generic file exposure (any server) ---
     ("/.env", "Environment file", "403", None),
     ("/.git/config", "Git config", "403", None),
+    ("/.svn/entries", "SVN metadata", "403", None),
+    ("/.DS_Store", "macOS directory metadata", "403", None),
+    ("/crossdomain.xml", "Flash cross-domain policy", "403", None),
+    ("/robots.txt", "Robots file", "404", None),
+    ("/sitemap.xml", "Sitemap", "404", None),
 
-    # --- Apache / LiteSpeed ---
+    # ── Technology-specific 404 triggers ──
+    ("/WTW-404-test.php", "Non-existent PHP file", "404", {"apache", "nginx", "litespeed", "php", "openresty"}),
+    ("/WTW-404-test.asp", "Non-existent ASP file", "404", {"iis", "asp.net"}),
+    ("/WTW-404-test.jsp", "Non-existent JSP file", "404", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty", "spring"}),
+    ("/WTW-404-test.py", "Non-existent Python file", "404", {"python", "django", "flask"}),
+
+    # ── Apache / LiteSpeed ──
     ("/.htaccess", "Apache config file", "403", {"apache", "litespeed"}),
+    ("/.htpasswd", "Apache password file", "403", {"apache", "litespeed"}),
     ("/server-status", "Apache mod_status", "403", {"apache"}),
     ("/server-info", "Apache mod_info", "403", {"apache"}),
+    ("/cgi-bin/", "CGI directory", "403", {"apache", "litespeed"}),
 
-    # --- Nginx ---
+    # ── Nginx / OpenResty ──
     ("/nginx.conf", "Nginx config file", "403", {"nginx", "openresty"}),
+    ("/nginx_status", "Nginx stub_status", "403", {"nginx", "openresty"}),
 
-    # --- IIS / ASP.NET ---
+    # ── IIS / ASP.NET ──
     ("/web.config", "IIS config file", "403", {"iis", "asp.net"}),
-    ("/elmah.axd", "ASP.NET error log", "403", {"iis", "asp.net"}),
-    ("/trace.axd", "ASP.NET trace", "403", {"iis", "asp.net"}),
+    ("/elmah.axd", "ASP.NET error log (ELMAH)", "403", {"iis", "asp.net"}),
+    ("/trace.axd", "ASP.NET trace handler", "403", {"iis", "asp.net"}),
+    ("/aspnet_client/", "ASP.NET client scripts", "403", {"iis", "asp.net"}),
+    ("/_vti_bin/", "FrontPage extensions", "403", {"iis"}),
+    ("/_vti_pvt/", "FrontPage private dir", "403", {"iis"}),
 
-    # --- Java (Tomcat, WildFly, WebLogic, Jetty, Spring) ---
-    ("/WEB-INF/web.xml", "Java deployment descriptor", "403", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty"}),
+    # ── Java — Tomcat ──
+    ("/WEB-INF/web.xml", "Java deployment descriptor", "403", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty", "spring"}),
+    ("/META-INF/MANIFEST.MF", "Java manifest", "403", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty"}),
+    ("/manager/html", "Tomcat Manager", "403", {"tomcat"}),
+    ("/host-manager/html", "Tomcat Host Manager", "403", {"tomcat"}),
+    ("/manager/status", "Tomcat server status", "403", {"tomcat"}),
+    ("/examples/", "Tomcat examples", "403", {"tomcat"}),
+
+    # ── Java — Spring Boot ──
     ("/actuator", "Spring Boot Actuator", "403", {"spring", "java", "tomcat"}),
     ("/actuator/health", "Spring Boot health endpoint", "403", {"spring", "java", "tomcat"}),
-    ("/manager/html", "Tomcat Manager", "403", {"tomcat"}),
+    ("/actuator/env", "Spring Boot environment", "403", {"spring", "java"}),
+    ("/actuator/configprops", "Spring Boot config props", "403", {"spring", "java"}),
+    ("/actuator/mappings", "Spring Boot URL mappings", "403", {"spring", "java"}),
+    ("/actuator/beans", "Spring Boot beans", "403", {"spring", "java"}),
+    ("/api-docs", "Swagger/OpenAPI docs", "403", {"spring", "java", "node"}),
+    ("/swagger-ui.html", "Swagger UI", "403", {"spring", "java"}),
+    ("/swagger-ui/", "Swagger UI (new)", "403", {"spring", "java"}),
+    ("/v2/api-docs", "Swagger v2 JSON", "403", {"spring", "java"}),
+    ("/v3/api-docs", "OpenAPI v3 JSON", "403", {"spring", "java"}),
 
-    # --- Node.js ---
-    ("/package.json", "Node.js package manifest", "403", {"node", "express", "deno"}),
+    # ── Java — WebLogic ──
+    ("/console/", "WebLogic admin console", "403", {"weblogic"}),
+    ("/wls-wsat/", "WebLogic WSAT", "403", {"weblogic"}),
+    ("/_async/", "WebLogic async servlet", "403", {"weblogic"}),
 
-    # --- Python (Django, Flask) ---
+    # ── Java — JBoss / WildFly ──
+    ("/admin-console/", "JBoss admin console", "403", {"wildfly"}),
+    ("/jmx-console/", "JBoss JMX console", "403", {"wildfly"}),
+    ("/web-console/", "JBoss web console", "403", {"wildfly"}),
+    ("/invoker/JMXInvokerServlet", "JBoss JMX invoker", "403", {"wildfly"}),
+
+    # ── Node.js / Express / Next.js ──
+    ("/package.json", "Node.js package manifest", "403", {"node", "express", "deno", "next"}),
+    ("/package-lock.json", "Node.js lock file", "403", {"node", "express"}),
+    ("/yarn.lock", "Yarn lock file", "403", {"node", "express"}),
+    ("/.npmrc", "NPM config", "403", {"node", "express"}),
+    ("/node_modules/", "Node modules directory", "403", {"node", "express"}),
+    ("/_next/data/", "Next.js data directory", "403", {"next", "node"}),
+    ("/api/", "API endpoint", "404", {"node", "express", "next"}),
+    ("/graphql", "GraphQL endpoint", "404", {"node", "express", "next", "python", "ruby", "java"}),
+
+    # ── Python — Django ──
     ("/admin/", "Django admin", "403", {"django", "python"}),
+    ("/admin/login/", "Django admin login", "403", {"django", "python"}),
     ("/__debug__/", "Django Debug Toolbar", "403", {"django", "python"}),
+    ("/static/admin/", "Django admin static files", "403", {"django", "python"}),
+    ("/api/schema/", "Django REST Framework schema", "403", {"django", "python"}),
 
-    # --- Ruby (Rails) ---
-    ("/rails/info/properties", "Rails info", "403", {"rails", "ruby"}),
+    # ── Python — Flask / FastAPI ──
+    ("/docs", "FastAPI Swagger docs", "403", {"python", "flask", "uvicorn", "gunicorn"}),
+    ("/redoc", "FastAPI ReDoc docs", "403", {"python", "flask", "uvicorn"}),
+    ("/openapi.json", "FastAPI OpenAPI spec", "403", {"python", "flask", "uvicorn"}),
 
-    # --- PHP frameworks ---
+    # ── Ruby — Rails ──
+    ("/rails/info/properties", "Rails info page", "403", {"rails", "ruby"}),
+    ("/rails/info/routes", "Rails routes", "403", {"rails", "ruby"}),
+    ("/rails/mailers", "Rails mailer previews", "403", {"rails", "ruby"}),
+    ("/assets/", "Rails assets pipeline", "403", {"rails", "ruby"}),
+    ("/sidekiq/", "Sidekiq web UI", "403", {"rails", "ruby"}),
+
+    # ── PHP ──
     ("/phpinfo.php", "PHP info page", "403", {"php"}),
-    ("/wp-login.php", "WordPress login", "403", {"wordpress", "php"}),
+    ("/info.php", "PHP info (alt name)", "403", {"php"}),
+    ("/php-fpm-status", "PHP-FPM status", "403", {"php"}),
 
-    # --- Generic error triggers ---
+    # ── PHP — WordPress ──
+    ("/wp-login.php", "WordPress login", "403", {"wordpress", "php"}),
+    ("/wp-admin/", "WordPress admin", "403", {"wordpress", "php"}),
+    ("/wp-config.php.bak", "WordPress config backup", "403", {"wordpress", "php"}),
+    ("/wp-json/wp/v2/users", "WordPress REST API users", "403", {"wordpress", "php"}),
+    ("/xmlrpc.php", "WordPress XML-RPC", "403", {"wordpress", "php"}),
+    ("/readme.html", "WordPress readme", "403", {"wordpress", "php"}),
+
+    # ── PHP — Laravel ──
+    ("/telescope", "Laravel Telescope debugger", "403", {"php", "laravel"}),
+    ("/horizon", "Laravel Horizon queue dashboard", "403", {"php", "laravel"}),
+    ("/_ignition/health-check", "Laravel Ignition", "403", {"php", "laravel"}),
+    ("/storage/logs/laravel.log", "Laravel log file", "403", {"php", "laravel"}),
+
+    # ── PHP — Other CMS ──
+    ("/administrator/", "Joomla admin", "403", {"php", "joomla"}),
+    ("/user/login", "Drupal login", "403", {"php", "drupal"}),
+    ("/admin/config/", "Drupal admin", "403", {"php", "drupal"}),
+    ("/typo3/", "TYPO3 admin", "403", {"php", "typo3"}),
+
+    # ── Go ──
+    ("/debug/pprof/", "Go pprof profiler", "403", {"go", "golang"}),
+    ("/debug/vars", "Go expvar debug", "403", {"go", "golang"}),
+
+    # ── Elixir / Erlang ──
+    ("/dashboard", "Phoenix LiveDashboard", "403", {"elixir", "cowboy"}),
+
+    # ── Hosting panels ──
+    ("/cpanel", "cPanel login", "403", {"cpanel"}),
+    ("/whm/", "WHM admin panel", "403", {"cpanel"}),
+    ("/:2083/", "cPanel HTTPS port", "403", {"cpanel"}),
+    ("/plesk/", "Plesk panel", "403", {"plesk"}),
+    ("/webmail/", "Webmail interface", "403", {"cpanel", "plesk"}),
+
+    # ── CI/CD / DevOps (common misconfigs) ──
+    ("/.github/workflows/", "GitHub Actions workflows", "403", None),
+    ("/.gitlab-ci.yml", "GitLab CI config", "403", None),
+    ("/Dockerfile", "Docker build file", "403", None),
+    ("/docker-compose.yml", "Docker Compose config", "403", None),
+    ("/.dockerenv", "Docker environment marker", "403", None),
+
+    # ── Backup / config leak (generic) ──
+    ("/backup.zip", "Backup archive", "403", None),
+    ("/backup.sql", "Database backup", "403", None),
+    ("/dump.sql", "Database dump", "403", None),
+    ("/config.yml", "YAML config file", "403", None),
+    ("/config.json", "JSON config file", "403", None),
+    ("/composer.json", "PHP Composer manifest", "403", {"php"}),
+    ("/composer.lock", "PHP Composer lock", "403", {"php"}),
+    ("/Gemfile", "Ruby Gemfile", "403", {"ruby", "rails"}),
+    ("/Gemfile.lock", "Ruby Gemfile lock", "403", {"ruby", "rails"}),
+    ("/requirements.txt", "Python requirements", "403", {"python"}),
+    ("/Pipfile", "Python Pipfile", "403", {"python"}),
+    ("/pom.xml", "Maven POM", "403", {"java"}),
+    ("/build.gradle", "Gradle build file", "403", {"java"}),
+    ("/go.mod", "Go module file", "403", {"go", "golang"}),
+    ("/Cargo.toml", "Rust Cargo manifest", "403", {"rust"}),
+
+    # ── Generic error triggers ──
     ("/%00", "Null byte in URL", "500", None),
     ("/%%", "Double percent encoding", "500", None),
 
-    # --- WAF trigger payloads (always probed, including SaaS) ---
+    # ── WAF trigger payloads (always probed, including SaaS) ──
     ("/?id=1'+OR+1=1--", "SQL injection probe", "waf", None),
     ("/<script>alert(1)</script>", "XSS probe", "waf", None),
     ("/?file=../../../etc/passwd", "Path traversal probe", "waf", None),
@@ -105,35 +219,82 @@ SAAS_PLATFORMS = {
 }
 
 # Server header keywords → detected technology set
+# NOTE: reverse proxies (nginx, openresty, etc.) are handled separately in
+# _PROXY_SERVERS — they probe everything since the backend is unknown.
 _SERVER_TECH_MAP = {
-    # Web servers
-    "apache": {"apache"}, "nginx": {"nginx"}, "litespeed": {"litespeed"},
-    "openresty": {"openresty", "nginx"}, "microsoft-iis": {"iis", "asp.net"},
+    # ── Web servers ──
+    "apache": {"apache"}, "litespeed": {"litespeed"},
+    "nginx": {"nginx"}, "openresty": {"openresty", "nginx"},
+    "microsoft-iis": {"iis", "asp.net"}, "microsoft-httpapi": {"iis", "asp.net"},
     "caddy": {"caddy"},
-    # Java (note: "apache tomcat" must not trigger apache httpd probes)
+    "cherokee": {"apache"},  # Cherokee behaves like Apache
+    "hiawatha": {"apache"},  # Hiawatha behaves like Apache
+
+    # ── Java (note: "apache tomcat" must not trigger apache httpd probes) ──
     "apache tomcat": {"tomcat", "java"}, "tomcat": {"tomcat", "java"},
     "jetty": {"jetty", "java"},
     "wildfly": {"wildfly", "java"}, "jboss": {"wildfly", "java"},
     "weblogic": {"weblogic", "java"}, "websphere": {"websphere", "java"},
     "glassfish": {"java"}, "payara": {"java"},
-    # Python
+    "resin": {"java"},  # Caucho Resin
+    "undertow": {"wildfly", "java"},  # WildFly/Undertow
+    "spring": {"spring", "java"},
+
+    # ── Python ──
     "gunicorn": {"gunicorn", "python"}, "uvicorn": {"uvicorn", "python"},
     "waitress": {"waitress", "python"}, "daphne": {"python", "django"},
-    "werkzeug": {"python", "flask"},
-    # Ruby
+    "werkzeug": {"python", "flask"}, "hypercorn": {"python"},
+    "twisted": {"python"}, "tornado": {"python"},
+    "cherrypy": {"python"},
+
+    # ── Ruby ──
     "puma": {"puma", "ruby", "rails"}, "thin": {"ruby", "rails"},
     "passenger": {"passenger", "ruby"},
-    # Node.js
+    "webrick": {"ruby"},  # Ruby stdlib server
+
+    # ── Node.js ──
     "express": {"express", "node"}, "deno": {"deno", "node"},
-    "next.js": {"node"}, "koa": {"node"},
-    # .NET
-    "kestrel": {"asp.net"},
-    # SaaS server headers (trigger SaaS detection)
+    "next.js": {"next", "node"}, "koa": {"node"},
+    "hapi": {"node"}, "fastify": {"node"},
+
+    # ── Go ──
+    "fasthttp": {"go", "golang"},
+
+    # ── Elixir / Erlang ──
+    "cowboy": {"cowboy", "elixir"},
+    "bandit": {"elixir"},  # Bandit (Elixir)
+
+    # ── Rust ──
+    "actix-web": {"rust"}, "hyper": {"rust"},
+    "warp": {"rust"}, "axum": {"rust"},
+
+    # ── .NET ──
+    "kestrel": {"asp.net"}, "microsoft-kestrel": {"asp.net"},
+
+    # ── PHP-specific headers ──
+    "php": {"php"},  # X-Powered-By: PHP/8.x
+
+    # ── CMS detection (from headers/body in other modules, but map here too) ──
+    "wordpress": {"wordpress", "php"}, "drupal": {"drupal", "php"},
+    "joomla": {"joomla", "php"}, "typo3": {"typo3", "php"},
+    "laravel": {"laravel", "php"},
+    "magento": {"php"},  # Magento e-commerce
+
+    # ── Hosting panels ──
+    "cpanel": {"cpanel"}, "plesk": {"plesk"},
+    "directadmin": {"cpanel"},  # Similar probe set
+    "cwpsrv": {"cpanel"},  # CentOS Web Panel
+
+    # ── SaaS server headers (trigger SaaS detection) ──
     "pepyaka": {"wix"}, "squarespace": {"squarespace"},
-    "shopify": {"shopify"}, "cowboy": {"cowboy", "elixir"},
-    # Proxies / LBs (don't filter probes — origin is behind them)
+    "shopify": {"shopify"},
+
+    # ── Proxies / LBs (empty set = handled by _PROXY_SERVERS logic) ──
     "envoy": set(), "istio-envoy": set(), "haproxy": set(),
     "varnish": set(), "traefik": set(),
+    "tengine": {"nginx"},  # Alibaba nginx fork — treat as proxy
+    "kong": set(),  # Kong API gateway
+    "apisix": set(),  # Apache APISIX gateway
 }
 
 # CNAME keywords that indicate provider-hosted SaaS
@@ -187,8 +348,11 @@ def _select_probes(server_header="", cnames=None, platform=None):
 
     # Servers commonly used as reverse proxies — backend tech is unknown,
     # so we probe everything to discover what's behind them
-    _PROXY_SERVERS = {"nginx", "openresty", "caddy", "envoy", "haproxy",
-                      "traefik", "varnish", "istio-envoy"}
+    _PROXY_SERVERS = {
+        "nginx", "openresty", "caddy", "envoy", "istio-envoy",
+        "haproxy", "traefik", "varnish", "tengine",
+        "kong", "apisix",  # API gateways
+    }
     is_proxy = bool(detected_tech & _PROXY_SERVERS) or not detected_tech
 
     # 3. Select probes
