@@ -181,8 +181,9 @@ PROBES = [
     ("/%%", "Double percent encoding", "500", None),
 
     # ── WAF trigger payloads (always probed, including SaaS) ──
+    # All payloads as query parameters — path-based payloads cause false 404s
     ("/?id=1'+OR+1=1--", "SQL injection probe", "waf", None),
-    ("/<script>alert(1)</script>", "XSS probe", "waf", None),
+    ("/?q=<script>alert(1)</script>", "XSS probe", "waf", None),
     ("/?file=../../../etc/passwd", "Path traversal probe", "waf", None),
     ("/?cmd=;cat+/etc/passwd", "Command injection probe", "waf", None),
     ("/?page=php://filter/convert.base64-encode/resource=index", "PHP filter probe", "waf", None),
