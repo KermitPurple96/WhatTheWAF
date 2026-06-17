@@ -4173,9 +4173,10 @@ def _waf_active_analysis(report):
             continue
         status = p.get("status", 0)
         has_waf_hit = bool(p.get("waf_hits"))
-        # A WAF hit on a blocking status (403, 429, etc.) = blocked.
-        # A WAF hit on a 200 just means the WAF/CDN is present, not that it blocked.
-        is_blocked = status in waf_trigger_statuses or (has_waf_hit and status not in (200, 201, 301, 302))
+        # Only blocking status codes count. WAF hit on 200/301/302 just means
+        # the WAF/CDN is present in headers, not that it blocked the request.
+        # 301/302 = redirect (server didn't block, just redirected)
+        is_blocked = status in waf_trigger_statuses
         entry = {"path": p["path"], "description": p["description"],
                  "status": status, "waf_hits": p.get("waf_hits", [])}
         if is_blocked:
@@ -4389,12 +4390,37 @@ def _print_report(report):
                 waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
                 has_waf_hit = bool(p.get("waf_hits"))
                 is_blocked = st in waf_trigger_statuses or (has_waf_hit and st not in (200, 201, 301, 302))
+
+                # Determine who blocked: WAF or backend server?
+                blocker = ""
+                if is_blocked and p.get("waf_hits"):
+                    # Check if the blocking WAF has WAF-specific headers (not just CDN presence)
+                    probe_hdrs = p.get("headers", {})
+                    _sigsci = any(k.lower().startswith("x-sigsci") for k in probe_hdrs)
+                    _cf_block = any(k.lower() in ("cf-chl-bypass", "cf-mitigated") for k in probe_hdrs)
+                    _akamai_block = any(k.lower() in ("x-akamai-session", "akamai-grn") for k in probe_hdrs)
+                    if _sigsci:
+                        blocker = f" {DIM}(Fastly WAF){RESET}"
+                    elif _cf_block:
+                        blocker = f" {DIM}(Cloudflare WAF){RESET}"
+                    elif _akamai_block:
+                        blocker = f" {DIM}(Akamai WAF){RESET}"
+                    else:
+                        # WAF signature present but no WAF-specific block headers
+                        # Likely the backend server blocking, not the WAF
+                        blocker = f" {DIM}(server){RESET}"
+                elif is_blocked:
+                    blocker = f" {DIM}(server){RESET}"
+
                 if is_blocked:
                     icon, color = "⊘", RED
-                    verdict = f"{RED}BLOCKED{RESET}"
+                    verdict = f"{RED}BLOCKED{RESET}{blocker}"
                 elif st == 200:
                     icon, color = "✓", GREEN
                     verdict = f"{YELLOW}PASSED{RESET}"
+                elif st in (301, 302, 307, 308):
+                    icon, color = "→", YELLOW
+                    verdict = f"{YELLOW}REDIRECT{RESET} {DIM}(payload not blocked, server redirected){RESET}"
                 else:
                     icon, color = "·", DIM
                     verdict = f"{DIM}[{st}]{RESET}"

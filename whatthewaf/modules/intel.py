@@ -41,10 +41,16 @@ WAF_INTEL = {
         "notes": "ELB does NOT filter attacks. It's infrastructure, not protection.",
     },
     "Fastly": {
-        "desc": "CDN + Next-Gen WAF (formerly Signal Sciences)",
+        "desc": "CDN only — no WAF unless Fastly Next-Gen WAF (Signal Sciences) is also detected",
+        "strengths": ["caching", "DDoS absorption", "edge compute"],
+        "weaknesses": ["no WAF rules by default", "just a CDN without the WAF add-on"],
+        "notes": "Fastly CDN does NOT filter attacks. Check if 'Fastly WAF' (x-sigsci-* headers) is also detected.",
+    },
+    "Fastly WAF": {
+        "desc": "Fastly Next-Gen WAF (Signal Sciences) — real WAF with attack filtering",
         "strengths": ["SQLi", "XSS", "RCE", "account takeover", "API abuse"],
-        "weaknesses": ["WAF is optional add-on", "CDN-only deploys have no WAF rules"],
-        "notes": "Fastly CDN != Fastly WAF. If attacks pass, WAF module may not be enabled.",
+        "weaknesses": ["depends on configured rules", "custom policies may have gaps"],
+        "notes": "Active WAF. Detected by x-sigsci-* headers in responses.",
     },
     "Sucuri": {
         "desc": "Cloud WAF + CDN (website firewall, popular with WordPress)",

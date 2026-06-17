@@ -103,13 +103,21 @@ SIGNATURES = [
         "cookies": [],
         "body": [r"the.requested.url.was.rejected..please.consult.with.your.administrator"],
     },
-    # --- Fastly ---
+    # --- Fastly CDN ---
     {
         "name": "Fastly",
-        "category": "CDN/WAF",
+        "category": "CDN",
         "headers": [("x-fastly-request-id", None), ("fastly-debug-digest", None), ("x-served-by", "cache-")],
         "cookies": [],
         "body": [r"fastly.error"],
+    },
+    # --- Fastly Next-Gen WAF (Signal Sciences) ---
+    {
+        "name": "Fastly WAF",
+        "category": "WAF",
+        "headers": [("x-sigsci-tags", None), ("x-sigsci-decision-ms", None), ("x-sigsci-requestid", None)],
+        "cookies": [],
+        "body": [r"blocked.by.website.security", r"request.blocked.*signal.sciences"],
     },
     # --- Azure CDN / Front Door ---
     {

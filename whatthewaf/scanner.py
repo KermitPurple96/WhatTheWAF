@@ -353,7 +353,7 @@ _ASN_TO_WAF = {
     "imperva": ("Imperva Incapsula", "WAF"),
     "sucuri": ("Sucuri", "WAF"),
     "cloudfront": ("AWS CloudFront", "CDN"),
-    "fastly": ("Fastly", "CDN/WAF"),
+    "fastly": ("Fastly", "CDN"),
     "stackpath": ("StackPath", "CDN/WAF"),
     "ddos-guard": ("DDoS-Guard", "WAF"),
     "radware": ("Radware AppWall", "WAF"),
