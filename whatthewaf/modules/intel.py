@@ -318,6 +318,142 @@ def identify_cname_platform(cnames):
     return None
 
 
+# Known SaaS → native CDN/WAF mapping
+SAAS_NATIVE_CDN = {
+    "Wix": {"Fastly"},
+    "Shopify": {"Cloudflare"},
+    "Squarespace": set(),
+    "Webflow": {"Fastly", "AWS CloudFront"},
+    "HubSpot": {"Cloudflare", "Fastly"},
+    "BigCommerce": {"Cloudflare"},
+    "WordPress.com": {"Automattic"},
+    "Ghost Pro": set(),
+    "Medium": {"Cloudflare"},
+    "Zendesk": {"Cloudflare"},
+}
+
+# SaaS platform names (lowercase) for matching
+_SAAS_NAMES = {
+    "wix", "squarespace", "shopify", "webflow", "weebly", "jimdo",
+    "strikingly", "tilda", "carrd", "webnode", "duda",
+    "site123", "format", "cargo", "readymag",
+    "bigcommerce", "volusion", "bigcartel", "ecwid",
+    "storenvy", "gumroad", "lemon squeezy", "sellfy",
+    "wordpress.com", "medium", "blogger", "tumblr",
+    "substack", "ghost pro", "ghost.io", "hashnode", "devto",
+    "hubspot", "unbounce", "leadpages", "instapage", "clickfunnels",
+    "mailchimp", "convertkit", "kajabi", "systeme",
+    "zendesk", "freshdesk", "intercom", "helpscout",
+    "salesforce", "servicenow",
+    "notion.site", "gitbook", "readme.io", "archbee",
+    "calendly", "acuity",
+    "bubble.io", "adalo", "glide", "softr",
+}
+
+# PaaS platforms (customer deploys code — file access probes ARE relevant)
+_PAAS_NAMES = {
+    "heroku", "vercel", "netlify", "render", "railway",
+    "fly.io", "google app engine", "azure app service",
+    "cloudflare pages",
+}
+
+# Managed hosting (customer controls app, not server — partial relevance)
+_MANAGED_NAMES = {
+    "wp engine", "kinsta", "pressable", "flywheel", "pantheon",
+    "pagely", "siteground",
+}
+
+
+def detect_platform(server_header="", cnames=None, waf_detections=None):
+    """Centralized platform detection — single source of truth for all modules.
+
+    Analyzes server header, CNAME chain, and WAF detections to determine:
+    - What platform/hosting the target uses
+    - Whether it's provider-hosted SaaS, PaaS, managed hosting, or self-hosted
+    - What the native CDN/WAF is (vs external WAFs)
+    - What's reportable and what's not
+
+    Returns dict:
+        platform_name: str or None  — "Wix", "Shopify", "Heroku", etc.
+        platform_desc: str or None  — human-readable description
+        hosting_type: str           — "saas", "paas", "managed", "self-hosted", "unknown"
+        is_saas: bool               — True if provider-hosted SaaS
+        native_waf: set             — WAFs that are part of the platform (e.g. Fastly for Wix)
+        external_wafs: list         — WAFs added by the customer on top (likely bypassable on SaaS)
+        server_controlled: bool     — True if customer controls server config
+        origin_discoverable: bool   — True if origin IP discovery makes sense
+    """
+    server_id = identify_server(server_header)
+    cname_id = identify_cname_platform(cnames)
+    # CNAME takes priority for platform identification (more reliable than server header)
+    # e.g. herokuapp.com CNAME > gunicorn server header
+    platform_id = cname_id or server_id
+
+    platform_name = platform_id[0] if platform_id else None
+    platform_desc = platform_id[1] if platform_id else None
+
+    # Determine hosting type — check CNAME platform first, then server header platform
+    hosting_type = "unknown"
+
+    def _classify_name(name):
+        name_lower = name.lower()
+        if name_lower in _SAAS_NAMES or any(s in name_lower for s in _SAAS_NAMES):
+            return "saas"
+        if name_lower in _PAAS_NAMES or any(s in name_lower for s in _PAAS_NAMES):
+            return "paas"
+        if name_lower in _MANAGED_NAMES or any(s in name_lower for s in _MANAGED_NAMES):
+            return "managed"
+        return None
+
+    # 1. Try CNAME-based detection first (most reliable)
+    if cname_id:
+        hosting_type = _classify_name(cname_id[0]) or "unknown"
+    # 2. Check CNAME keywords directly
+    if hosting_type == "unknown" and cnames:
+        from .error_pages import _SAAS_CNAME_KEYWORDS
+        cname_str = " ".join(cnames).lower()
+        for keyword in _SAAS_CNAME_KEYWORDS:
+            if keyword in cname_str:
+                hosting_type = "saas"
+                break
+    # 3. Fall back to server header
+    if hosting_type == "unknown" and server_id:
+        hosting_type = _classify_name(server_id[0]) or "unknown"
+    # 4. If we see a standard web server, it's self-hosted
+    if hosting_type == "unknown" and server_header:
+        server_lower = server_header.lower()
+        _self_hosted_servers = {"apache", "nginx", "litespeed", "microsoft-iis",
+                                "caddy", "tomcat", "jetty", "gunicorn", "uvicorn",
+                                "puma", "kestrel", "wildfly", "weblogic"}
+        if any(s in server_lower for s in _self_hosted_servers):
+            hosting_type = "self-hosted"
+
+    is_saas = hosting_type == "saas"
+
+    # Determine native vs external WAFs
+    native_waf = set()
+    external_wafs = []
+    if platform_name and is_saas:
+        native_waf = SAAS_NATIVE_CDN.get(platform_name, set())
+
+    if waf_detections:
+        real_wafs = [d["name"] for d in waf_detections if d.get("category") in ("WAF", "CDN/WAF")]
+        if is_saas:
+            external_wafs = [w for w in real_wafs if w not in native_waf]
+        # else: on self-hosted, all WAFs are "the customer's"
+
+    return {
+        "platform_name": platform_name,
+        "platform_desc": platform_desc,
+        "hosting_type": hosting_type,
+        "is_saas": is_saas,
+        "native_waf": native_waf,
+        "external_wafs": external_wafs,
+        "server_controlled": hosting_type in ("self-hosted", "managed", "paas"),
+        "origin_discoverable": hosting_type in ("self-hosted", "managed"),
+    }
+
+
 def build_insights(report):
     """Build contextual insights from all scan data.
 
@@ -332,18 +468,26 @@ def build_insights(report):
     cnames = report.get("cnames", [])
     ips = report.get("ips", [])
 
-    # 1. Identify the platform from server header + CNAME
+    # 1. Platform context (use centralized detection if available)
+    plat = report.get("platform")
+    if not plat:
+        plat = detect_platform(server_header, cnames, waf_detections)
+
     server_id = identify_server(server_header)
     cname_id = identify_cname_platform(cnames)
     platform = server_id or cname_id
 
     if platform and cname_id and server_id and server_id[0] != cname_id[0]:
-        # Different platforms from server vs CNAME = interesting stack
         insights.append(
             f"Platform: {server_id[0]} ({server_id[1]}) behind {cname_id[0]} ({cname_id[1]})"
         )
     elif platform:
-        insights.append(f"Platform: {platform[0]} — {platform[1]}")
+        hosting_label = {"saas": "provider-hosted", "paas": "PaaS", "managed": "managed hosting"}.get(
+            plat.get("hosting_type", ""), "")
+        if hosting_label:
+            insights.append(f"Platform: {platform[0]} — {platform[1]} [{hosting_label}]")
+        else:
+            insights.append(f"Platform: {platform[0]} — {platform[1]}")
 
     # 2. WAF-specific intel
     for name in waf_names:
@@ -429,28 +573,17 @@ def build_insights(report):
         elif intel and "no waf" in intel.get("notes", "").lower():
             insights.append(f"{cdn}: {intel['notes']}")
 
-    # 6. SaaS platform detection — explain what's reportable and WAF limitations
-    is_saas = report.get("error_pages", {}).get("is_saas", False)
-    if is_saas and platform:
-        platform_name = platform[0]
+    # 6. Platform-specific insights based on hosting type
+    is_saas = plat.get("is_saas", False)
+    platform_name = plat.get("platform_name")
+
+    if is_saas and platform_name:
         insights.append(
             f"{platform_name} is provider-hosted SaaS — server config controlled by provider. "
             "File access findings are not reportable, but WAF gaps (SQLi/XSS passing through) ARE."
         )
 
-        # Detect if there's an external WAF on top of the SaaS platform
-        # Known SaaS → native CDN/WAF mapping (what the platform uses internally)
-        _saas_native_cdn = {
-            "Wix": {"Fastly"},
-            "Shopify": {"Cloudflare"},
-            "Squarespace": set(),
-            "Webflow": {"Fastly", "AWS CloudFront"},
-            "HubSpot": {"Cloudflare", "Fastly"},
-            "BigCommerce": {"Cloudflare"},
-        }
-        native_cdns = _saas_native_cdn.get(platform_name, set())
-        external_wafs = [n for n in real_wafs if n not in native_cdns]
-
+        external_wafs = plat.get("external_wafs", [])
         if external_wafs:
             ext_names = ", ".join(external_wafs)
             insights.append(
@@ -464,13 +597,19 @@ def build_insights(report):
                 f"{platform_name} has no effective WAF — attack payloads pass through. "
                 f"Customer cannot add server-level protections on provider-hosted SaaS."
             )
+    elif plat.get("hosting_type") == "paas" and platform_name:
+        if not real_wafs and passed_attacks:
+            insights.append(
+                f"{platform_name} (PaaS) — no WAF detected. Customer deploys code but "
+                "may not have WAF controls. Consider adding a CDN/WAF (Cloudflare, etc.)."
+            )
 
-    # 7. External WAF on non-SaaS — different situation (can be properly configured)
-    if not is_saas and real_wafs:
+    # 7. WAF notes — only for self-hosted/managed where customer can act on them
+    if plat.get("server_controlled", True) and real_wafs:
         for name in real_wafs:
-            intel = WAF_INTEL.get(name)
-            if intel and intel.get("notes"):
-                insights.append(f"{intel['notes']}")
+            waf_intel = WAF_INTEL.get(name)
+            if waf_intel and waf_intel.get("notes"):
+                insights.append(f"{waf_intel['notes']}")
 
     # Deduplicate while preserving order
     seen = set()

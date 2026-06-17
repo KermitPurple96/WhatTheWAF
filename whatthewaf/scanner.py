@@ -185,10 +185,19 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
         else:
             report["http"] = {"error": resp.get("error", "unknown")}
 
+    # 3b. Platform detection (centralized — used by all subsequent modules)
+    from .modules.intel import detect_platform
+    server_hdr = report.get("http", {}).get("server", "")
+    platform = detect_platform(
+        server_header=server_hdr,
+        cnames=report.get("cnames", []),
+        waf_detections=report.get("waf", []),
+    )
+    report["platform"] = platform
+
     # 4. Error page probing (filtered by detected server/platform)
     if _should_run("errors"):
         status("errors", "Probing error pages for WAF signatures")
-        server_hdr = report.get("http", {}).get("server", "")
         ep = error_pages.probe_error_pages(
             url, timeout=timeout, user_agent=user_agent, proxy=proxy,
             server_header=server_hdr, cnames=report.get("cnames", []),
@@ -450,6 +459,16 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
     else:
         report["cdn_response"] = {"error": cdn_resp["error"]}
 
+    # 2b. Platform detection for bypass context
+    from .modules.intel import detect_platform
+    cdn_server = report.get("cdn_response", {}).get("server", "")
+    platform = detect_platform(
+        server_header=cdn_server,
+        cnames=report.get("dns_resolution", {}).get("cnames", []),
+        waf_detections=report.get("waf_via_cdn", []),
+    )
+    report["platform"] = platform
+
     # 3. Direct HTTPS connection to IP with Host header
     # Use httpx transport with custom DNS to resolve domain → IP directly
     # This is equivalent to curl --resolve domain:443:ip https://domain/
@@ -691,19 +710,40 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
     # Store hash comparison in report
     report["hash_match"] = same_hash
 
+    # Check if target is provider-hosted SaaS (changes bypass interpretation)
+    is_saas = platform.get("is_saas", False)
+    saas_name = platform.get("platform_name", "")
+
     if direct_err:
         report["bypass_confirmed"] = False
         report["summary"] = f"Direct connection failed: {direct_err}"
     elif is_default_vhost:
-        # Default/parking page — not the target domain
         report["bypass_confirmed"] = False
         report["summary"] = "DEFAULT VHOST — IP responds with a default/parking page, not the target domain"
     elif not direct_status or direct_status == 0:
         report["bypass_confirmed"] = False
         report["summary"] = "Could not determine bypass status"
+    elif is_saas:
+        # SaaS provider-hosted — the origin IP is the provider's shared infrastructure.
+        # Accessing it directly doesn't bypass anything meaningful.
+        if same_hash and direct_status in (200, 301, 302):
+            report["bypass_confirmed"] = False
+            report["summary"] = (f"SAAS ORIGIN — {saas_name} shared infrastructure responds (hash: {direct_hash}). "
+                                 f"This is not a WAF bypass — the IP is {saas_name}'s provider infrastructure, "
+                                 f"not a customer-controlled origin.")
+            # But if there's an external WAF, note it IS bypassable
+            ext_wafs = platform.get("external_wafs", [])
+            if ext_wafs:
+                ext_names = ", ".join(ext_wafs)
+                report["bypass_confirmed"] = True
+                report["summary"] = (f"EXTERNAL WAF BYPASS — {ext_names} bypassed by accessing {saas_name}'s "
+                                     f"origin directly. Customer cannot restrict {saas_name}'s origin to only "
+                                     f"accept traffic from {ext_names}.")
+        else:
+            report["bypass_confirmed"] = False
+            report["summary"] = (f"SAAS ORIGIN — {saas_name} provider infrastructure "
+                                 f"(status: {direct_status}). Not a bypass.")
     elif same_hash:
-        # Hashes match — same content via CDN and direct IP
-        # This is the strongest confirmation: the origin serves the same content
         if dns_has_waf:
             report["bypass_confirmed"] = True
             report["summary"] = (f"WAF BYPASS CONFIRMED — Same content hash via CDN and direct IP "
@@ -713,11 +753,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
             report["summary"] = (f"DIRECT ACCESS CONFIRMED — Same content hash via domain and direct IP "
                                  f"(hash: {direct_hash})")
     else:
-        # Hashes don't match — content differs between CDN and direct IP
-        # Could be: different vhost, WAF blocking, different app version, etc.
         if dns_has_waf and direct_status in (200, 301, 302):
-            # Server responds with real content (not an error) but different from CDN
-            # Likely the origin without CDN transformations (minification, caching, etc.)
             report["bypass_confirmed"] = True
             report["summary"] = (f"WAF BYPASS LIKELY — Origin responds (status: {direct_status}) "
                                  f"but content differs from CDN (CDN hash: {cdn_hash}, direct hash: {direct_hash})")
