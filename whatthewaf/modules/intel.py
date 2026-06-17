@@ -429,19 +429,48 @@ def build_insights(report):
         elif intel and "no waf" in intel.get("notes", "").lower():
             insights.append(f"{cdn}: {intel['notes']}")
 
-    # 6. SaaS platform detection — explain what's reportable
+    # 6. SaaS platform detection — explain what's reportable and WAF limitations
     is_saas = report.get("error_pages", {}).get("is_saas", False)
     if is_saas and platform:
+        platform_name = platform[0]
         insights.append(
-            f"{platform[0]} is provider-hosted SaaS — server config controlled by provider. "
+            f"{platform_name} is provider-hosted SaaS — server config controlled by provider. "
             "File access findings are not reportable, but WAF gaps (SQLi/XSS passing through) ARE."
         )
 
-    # 7. Practical notes from WAF intel
-    for name in real_wafs:
-        intel = WAF_INTEL.get(name)
-        if intel and intel.get("notes"):
-            insights.append(f"{intel['notes']}")
+        # Detect if there's an external WAF on top of the SaaS platform
+        # Known SaaS → native CDN/WAF mapping (what the platform uses internally)
+        _saas_native_cdn = {
+            "Wix": {"Fastly"},
+            "Shopify": {"Cloudflare"},
+            "Squarespace": set(),
+            "Webflow": {"Fastly", "AWS CloudFront"},
+            "HubSpot": {"Cloudflare", "Fastly"},
+            "BigCommerce": {"Cloudflare"},
+        }
+        native_cdns = _saas_native_cdn.get(platform_name, set())
+        external_wafs = [n for n in real_wafs if n not in native_cdns]
+
+        if external_wafs:
+            ext_names = ", ".join(external_wafs)
+            insights.append(
+                f"External WAF detected: {ext_names} in front of {platform_name}. "
+                f"Likely bypassable — {platform_name}'s origin IP is shared provider infrastructure "
+                f"and the customer cannot restrict it to only accept traffic from {ext_names}. "
+                "Direct access to the origin bypasses the external WAF entirely."
+            )
+        elif not real_wafs and passed_attacks:
+            insights.append(
+                f"{platform_name} has no effective WAF — attack payloads pass through. "
+                f"Customer cannot add server-level protections on provider-hosted SaaS."
+            )
+
+    # 7. External WAF on non-SaaS — different situation (can be properly configured)
+    if not is_saas and real_wafs:
+        for name in real_wafs:
+            intel = WAF_INTEL.get(name)
+            if intel and intel.get("notes"):
+                insights.append(f"{intel['notes']}")
 
     # Deduplicate while preserving order
     seen = set()
