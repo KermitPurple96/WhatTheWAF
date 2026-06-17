@@ -18,9 +18,11 @@ API keys config: `~/.config/whatthewaf/api_keys.conf` (auto-created on install, 
 ## Quick Start
 
 ```bash
-wtw example.com                        # WAF detection + basic recon
+wtw example.com                        # Full scan (WAF + recon)
+wtw example.com --waf                  # WAF/CDN detection only
+wtw example.com --waf --tls            # WAF detection + TLS audit
 wtw example.com --tls                  # TLS/SSL audit (standalone)
-wtw example.com --tls --subs --cert    # Full scan with TLS, subs, and cert
+wtw example.com --tls --subs --cert    # TLS + subs + cert
 wtw example.com --trace                # Infrastructure chain + traceroute
 wtw example.com --ip auto              # Auto-discover + test bypass
 wtw example.com --ip 1.2.3.0/24       # Test CIDR range
@@ -35,19 +37,24 @@ wtw example.com --profile stealth      # Use a saved profile
 wtw example.com --json -o report.json  # JSON output
 ```
 
-All scan features are **opt-in** — only enable what you need:
+Pass only the flags you need — each one runs its module, nothing more:
 
-| Flag | What it adds |
+| Flag | What it does |
 |------|-------------|
+| `--waf` | WAF/CDN detection + error page probing |
+| `--tls` | TLS/SSL audit (protocols, ciphers, vulnerabilities) |
+| `--evasion` | WAF evasion analysis (UA, encoding, methods) |
 | `--subs` | Subdomain leakage scan |
 | `--cert` | SSL certificate check |
-| `--tls` | TLS fingerprint analysis (standalone if alone) |
 | `--history` | Historical DNS records |
-| `--evasion` | WAF evasion analysis |
+| `--errors` | Error page probing only |
+| `--bypass` | WAF bypass testing with resolved IPs |
+
+Combine freely: `wtw example.com --waf --tls --evasion`. No flags = full scan.
 
 ## Features
 
-### `--only waf` — WAF/CDN Detection
+### `--waf` — WAF/CDN Detection
 
 90+ WAF/CDN signatures matched against HTTP headers, cookies, body, and error pages. When ASN identifies a CDN/WAF that headers don't reveal (e.g. Cloudflare with `server: nginx`), it's auto-detected. Error page probing (15 probes including SQLi, XSS, path traversal triggers) is included automatically. Also detects WAF **tier/plan** (Cloudflare Free/Pro/Enterprise, Akamai Standard/Bot Manager, etc.) from cookies and behavioral signals.
 
@@ -413,7 +420,7 @@ auto_retry = true
 Combine a profile with any action:
 
 ```bash
-wtw example.com --profile chrome-vpn --only waf        # WAF detection as Chrome via VPN
+wtw example.com --profile chrome-vpn --waf              # WAF detection as Chrome via VPN
 wtw example.com --profile chrome-vpn --waf-scan        # Deep audit as Chrome via VPN
 wtw example.com --profile paranoid --evasion            # Evasion with max stealth
 wtw --profile ?                                         # List available profiles + options
@@ -447,10 +454,12 @@ targets                  Domain(s), IP(s), or @file.txt
 --origins                Quick DNS + ASN classification
 --vecino                 Reverse IP neighbours + hosting type (shared/VPS/SaaS)
 
-# Analysis (all opt-in)
---only MODULES           Specific modules: waf, errors, tls, evasion, bypass, cert, subs, history, proxy
+# Analysis (pass only what you need, no flags = full scan)
+--waf                    WAF/CDN detection + error page probing
+--errors                 Error page probing only
+--bypass                 WAF bypass testing with resolved IPs
 --trace                  Infrastructure chain + network traceroute
---tls                    TLS/SSL audit (standalone, or add to full scan)
+--tls                    TLS/SSL audit
 --subs                   Subdomain leakage scan
 --cert                   SSL certificate check
 --history                Historical DNS records

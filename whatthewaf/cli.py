@@ -5,6 +5,11 @@ import json
 import re
 import sys
 import os
+import warnings
+
+warnings.filterwarnings("ignore", message="urllib3.*doesn't match a supported")
+warnings.filterwarnings("ignore", message="The 'strict' parameter")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
 
 from . import __version__
 from .constants import CDN_WAF_KEYWORDS
@@ -167,7 +172,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   whatthewaf example.com
-  whatthewaf example.com --only waf
+  whatthewaf example.com --waf
+  whatthewaf example.com --waf --tls
   whatthewaf example.com --ip auto
   whatthewaf example.com --evasion
   whatthewaf example.com --waf-scan
@@ -194,8 +200,10 @@ def main():
                         help="Quick DNS + ASN classification (which IPs are CDN vs origin)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("-o", "--output", metavar="FILE")
-    parser.add_argument("--only", metavar="MODULES",
-                        help="Run only specific modules (comma-separated): waf, errors, tls, evasion, bypass, cert, subs, history, proxy")
+    parser.add_argument("--waf", action="store_true", help="WAF/CDN detection + error page probing")
+    parser.add_argument("--errors", action="store_true", help="Error page probing only")
+    parser.add_argument("--bypass", action="store_true", help="WAF bypass testing with resolved IPs")
+    parser.add_argument("--only", metavar="MODULES", help=argparse.SUPPRESS)
     parser.add_argument("--ip", metavar="IP",
                         help="IP(s) to test for WAF bypass — single IP, comma-separated, CIDR range (1.2.3.0/24), 'auto', or 'history'")
     parser.add_argument("--path", metavar="PATH", default="/",
@@ -321,6 +329,8 @@ def main():
                         help="Whoxy WHOIS + reverse WHOIS to find sibling domains and shared IPs")
     parser.add_argument("--dnstrails", action="store_true",
                         help="DNSTrails historical DNS records and subdomain enumeration")
+    parser.add_argument("--headers", action="store_true",
+                        help="Audit HTTP security headers (HSTS, CSP, X-Frame-Options, cookies, info leaks)")
     parser.add_argument("--vecino", action="store_true",
                         help="Reverse IP neighbours + hosting type classification (shared/VPS/SaaS)")
     parser.add_argument("--recon", action="store_true",
@@ -412,6 +422,12 @@ def main():
                       args.dnstrails])
     if osint_mode:
         _run_osint(targets, args)
+        return
+
+    if args.headers:
+        if not targets:
+            parser.error("--headers requires at least one target.")
+        _run_headers(targets, args)
         return
 
     if args.vecino:
@@ -2911,6 +2927,109 @@ def _collect_targets(args):
     return targets
 
 
+def _run_headers(targets, args):
+    """Audit HTTP security headers."""
+    from .modules import security_headers
+    from .scanner import fetch_response
+
+    is_json = args.json
+    all_results = []
+
+    # Build extra headers
+    extra_headers = {}
+    if getattr(args, "cookie", None):
+        extra_headers["Cookie"] = args.cookie
+    for h in (getattr(args, "header", None) or []):
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+
+    for target in targets:
+        url = target if target.startswith("http") else f"https://{target}"
+
+        if not is_json:
+            sys.stderr.write(f"\r\033[K{DIM}  [~] Fetching {url}...{RESET}")
+            sys.stderr.flush()
+
+        resp = fetch_response(url, timeout=args.timeout,
+                              user_agent=args.user_agent,
+                              proxy=args.proxy,
+                              extra_headers=extra_headers or None)
+
+        if not is_json:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+
+        if "error" in resp:
+            print(f"{RED}[!] Error fetching {url}: {resp['error']}{RESET}", file=sys.stderr)
+            continue
+
+        audit = security_headers.audit_headers(
+            resp["headers"], cookies=resp.get("cookies", []), url=url
+        )
+        audit["target"] = target
+        audit["status"] = resp.get("status")
+        all_results.append(audit)
+
+        if not is_json:
+            W = max(len(target) + 20, 60)
+            print(f"\n{BOLD}{CYAN}{'=' * W}{RESET}")
+            print(f"{BOLD}{CYAN}  Security Headers: {target}{RESET}")
+            print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
+            print(f"  {BOLD}Score:{RESET} {audit['score']}% ({len(audit['present'])}/{audit['total']} headers present)")
+            print(f"  {BOLD}URL:{RESET}   {url}  [{resp.get('status', '?')}]")
+
+            # Missing headers
+            if audit["missing"]:
+                _section("Missing Headers", RED)
+                for h in audit["missing"]:
+                    sev_color = RED if h["severity"] == "high" else YELLOW if h["severity"] == "medium" else DIM
+                    _line(f"{sev_color}✗ {h['name']:<35}{RESET} [{h['severity'].upper():<6}] {h['description']}")
+                    _line(f"  {DIM}Recommended: {h['recommended']}{RESET}")
+
+            # Present headers
+            if audit["present"]:
+                _section("Present Headers", GREEN)
+                for h in audit["present"]:
+                    val_preview = h["value"][:80]
+                    _line(f"{GREEN}✓ {h['name']:<35}{RESET} {DIM}{val_preview}{RESET}")
+
+            # Warnings (present but weak)
+            if audit["warnings"]:
+                _section("Weak Configuration", YELLOW)
+                for h in audit["warnings"]:
+                    _line(f"{YELLOW}⚠ {h['name']:<35}{RESET} {h['value'][:60]}")
+                    _line(f"  {RED}→ {h['warning']}{RESET}")
+
+            # Dangerous/deprecated headers
+            if audit.get("dangerous"):
+                _section("Dangerous / Deprecated Headers", RED)
+                for h in audit["dangerous"]:
+                    _line(f"{RED}✗ {h['name']}: {h['value']}{RESET}")
+                    _line(f"  {DIM}{h['description']}{RESET}")
+                    _line(f"  {CYAN}→ {h['recommendation']}{RESET}")
+
+            # Info leak
+            if audit["info_leak"]:
+                _section("Information Leakage", YELLOW)
+                for h in audit["info_leak"]:
+                    _line(f"{YELLOW}⚠ {h['name']}: {h['value']}{RESET}")
+
+            # Cookie issues
+            if audit["cookie_issues"]:
+                _section("Cookie Security Issues", RED)
+                for c in audit["cookie_issues"]:
+                    issues_str = ", ".join(c["issues"])
+                    _line(f"{RED}✗{RESET} {c['name']}: {YELLOW}{issues_str}{RESET}")
+
+            print()
+
+    if is_json:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+    elif args.output:
+        _write_output(json.dumps(all_results, indent=2, default=str), args.output)
+
+
 def _run_vecino(targets, args):
     """Run reverse IP neighbours + SSL cert hosting classification."""
     try:
@@ -3309,12 +3428,30 @@ def _run_direct_ip(targets, args):
 
             # Quick pre-filter: parallel TCP connect + lightweight probe to discard dead/unrelated IPs
             if len(kept) > 3:
+                # Fetch target title from CDN for comparison
+                cdn_title = ""
+                try:
+                    import httpx as _httpx
+                    with _httpx.Client(timeout=8, verify=False, follow_redirects=True) as _hc:
+                        _cdn_resp = _hc.get(
+                            f"https://{domain}/",
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                        )
+                        if _cdn_resp.status_code == 200:
+                            import re as _re
+                            _tm = _re.search(r'<title[^>]*>(.*?)</title>', _cdn_resp.text[:5000], _re.IGNORECASE | _re.DOTALL)
+                            if _tm:
+                                cdn_title = " ".join(_tm.group(1).strip().lower().split())
+                except Exception:
+                    pass
+
                 print(f"{CYAN}[*] Quick probe: {len(kept)} IPs (TCP:443 + Host header check)...{RESET}", file=sys.stderr)
                 probed = _quick_probe_ips([t["ip"] for t in kept], domain, timeout=min(args.timeout, 5))
 
                 alive = []
                 dead = []
                 wrong_host = []
+                title_mismatch = []
                 for t in kept:
                     probe = probed.get(t["ip"], {})
                     if probe.get("error"):
@@ -3324,12 +3461,42 @@ def _run_direct_ip(targets, args):
                     else:
                         t["probe_status"] = probe.get("status")
                         t["probe_title"] = probe.get("title", "")
-                        alive.append(t)
+                        probe_title_norm = " ".join(t["probe_title"].lower().split()) if t["probe_title"] else ""
+                        status = t["probe_status"]
+                        is_favicon_src = "favicon" in t.get("source", "")
+
+                        # Decide if this IP is clearly unrelated
+                        skip = False
+                        if cdn_title and probe_title_norm and probe_title_norm != cdn_title:
+                            if status == 200:
+                                # 200 with wrong title = definitely unrelated
+                                skip = True
+                            elif is_favicon_src:
+                                # Non-200 with wrong title from favicon = unrelated server
+                                skip = True
+                            elif status in (400, 403, 404):
+                                # Client error with wrong title = not our target
+                                skip = True
+                        # Favicon source: skip error/redirect responses (not the target)
+                        if not skip and is_favicon_src:
+                            if status in (301, 302, 303, 307, 308):
+                                location = probe.get("location", "").lower()
+                                if not location or domain.lower() not in location:
+                                    skip = True
+                            elif status in (403, 404):
+                                skip = True
+
+                        if skip:
+                            title_mismatch.append(t)
+                        else:
+                            alive.append(t)
 
                 if dead:
                     print(f"  {DIM}Skipped {len(dead)} IP(s) — no response on port 443{RESET}", file=sys.stderr)
                 if wrong_host:
                     print(f"  {DIM}Skipped {len(wrong_host)} IP(s) — responds but wrong host/default page{RESET}", file=sys.stderr)
+                if title_mismatch:
+                    print(f"  {DIM}Skipped {len(title_mismatch)} IP(s) — title mismatch (unrelated site){RESET}", file=sys.stderr)
 
                 if not alive:
                     print(f"{YELLOW}[!] No IPs responded for {domain} on port 443{RESET}", file=sys.stderr)
@@ -3499,7 +3666,11 @@ def _quick_probe_ips(ips, domain, timeout=5):
             if status in (400, 421) and len(body) < 500:
                 wrong_host = True
 
-            return {"status": status, "title": title, "wrong_host": wrong_host}
+            location = ""
+            if status in (301, 302, 303, 307, 308):
+                location = str(resp.headers.get("location", ""))
+
+            return {"status": status, "title": title, "wrong_host": wrong_host, "location": location}
 
         except Exception as e:
             err = str(e)
@@ -3786,12 +3957,31 @@ def _run_full(targets, args):
     is_json = args.json
     status_cb = _make_status_callback(quiet=is_json)
 
+    # Build only_modules from individual flags
+    # If no module flags are passed, only_modules stays None → all modules run
     only_modules = None
     if args.only:
+        # Legacy --only support (hidden)
         only_modules = set(m.strip().lower() for m in args.only.split(","))
-        # --only waf implies error page probing (WAFs reveal themselves on blocks)
         if "waf" in only_modules:
             only_modules.add("errors")
+    else:
+        _flag_to_modules = {
+            "waf": {"waf", "errors"},
+            "errors": {"errors"},
+            "tls": {"tls"},
+            "evasion": {"evasion"},
+            "bypass": {"bypass"},
+            "cert": {"cert"},
+            "subs": {"subs"},
+            "history": {"history"},
+        }
+        selected = set()
+        for flag, modules in _flag_to_modules.items():
+            if getattr(args, flag, False):
+                selected.update(modules)
+        if selected:
+            only_modules = selected
 
     # All features are opt-in: --subs, --cert, --tls, --history, --evasion
     # Build extra headers from --cookie and --header
@@ -3867,7 +4057,10 @@ def _line(text):
 
 
 def _waf_active_analysis(report):
-    """Analyze error page probes to determine if WAF is actively blocking attacks."""
+    """Analyze error page probes to determine if WAF is actively blocking attacks.
+
+    Returns (blocked, passed) for attack payloads only (trigger == "waf").
+    """
     ep = report.get("error_pages", {})
     ep_probes = ep.get("probes", [])
     blocked = []
@@ -3890,6 +4083,34 @@ def _waf_active_analysis(report):
     return blocked, passed
 
 
+# Attack categories for gap analysis
+_ATTACK_CATEGORIES = {
+    "SQL injection probe": "SQLi",
+    "XSS probe": "XSS",
+    "Path traversal probe": "Path Traversal",
+    "Command injection probe": "Command Injection",
+    "PHP filter probe": "LFI/PHP Wrappers",
+}
+
+# Categories that are critical if unprotected
+_CRITICAL_CATEGORIES = {"SQLi", "LFI/PHP Wrappers", "Command Injection"}
+
+
+def _classify_waf_type(waf_detections):
+    """Classify detections as real WAFs vs web server hardening.
+
+    Returns (real_wafs, server_hardening) — both lists of names.
+    """
+    real_wafs = []
+    server_hardening = []
+    for d in waf_detections:
+        if d["category"] in ("WAF", "CDN/WAF"):
+            real_wafs.append(d["name"])
+        elif d["category"] == "Web Server":
+            server_hardening.append(d["name"])
+    return list(dict.fromkeys(real_wafs)), list(dict.fromkeys(server_hardening))
+
+
 def _print_report(report):
     target = report['target']
     W = max(len(target) + 16, 60)
@@ -3901,7 +4122,7 @@ def _print_report(report):
 
     # ── WAF STATUS (the main verdict) ──
     waf_detections = report.get("waf", [])
-    waf_names = [d["name"] for d in waf_detections if d["category"] in ("WAF", "CDN/WAF")]
+    real_wafs, server_hardening = _classify_waf_type(waf_detections)
     cdn_names = [d["name"] for d in waf_detections if d["category"] in ("CDN", "CDN/WAF")]
     for rec in report.get("ips", []):
         if rec.get("classification") == "CDN" and rec.get("provider"):
@@ -3912,9 +4133,8 @@ def _print_report(report):
     blocked, passed = _waf_active_analysis(report)
 
     _section("WAF Status", CYAN)
-    if waf_names:
-        unique_waf = list(dict.fromkeys(waf_names))
-        _line(f"{RED}[+] WAF Detected:{RESET} {BOLD}{', '.join(unique_waf)}{RESET}")
+    if real_wafs:
+        _line(f"{RED}[+] WAF Detected:{RESET} {BOLD}{', '.join(real_wafs)}{RESET}")
         if blocked:
             _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{len(blocked)+len(passed)} attack payloads")
             for b in blocked:
@@ -3928,6 +4148,21 @@ def _print_report(report):
                 _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
         else:
             _line(f"{DIM}[?] WAF Active:   Unknown (no probe results){RESET}")
+    elif server_hardening:
+        # Only web server detected, no real WAF — important distinction
+        _line(f"{YELLOW}[~] WAF Detected:{RESET} {BOLD}No{RESET}")
+        _line(f"{YELLOW}[~] Server Hardening:{RESET} {BOLD}{', '.join(server_hardening)}{RESET} — {DIM}not a WAF, just server config (e.g. Deny rules in .htaccess){RESET}")
+        if blocked:
+            _line(f"{YELLOW}[~] Blocking:{RESET}     {len(blocked)}/{len(blocked)+len(passed)} attack payloads — {DIM}likely mod_rewrite/mod_security basic rules, not a full WAF{RESET}")
+            for b in blocked:
+                waf_str = f" ({', '.join(b['waf_hits'])})" if b["waf_hits"] else ""
+                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}{waf_str}")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+        elif passed:
+            _line(f"{YELLOW}[~] Blocking:{RESET}     {YELLOW}NONE{RESET} — {BOLD}no attack payloads blocked{RESET}")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
     else:
         if blocked:
             _line(f"{YELLOW}[+] WAF Detected:{RESET} {BOLD}Unknown WAF{RESET} (no signature match)")
@@ -3942,6 +4177,22 @@ def _print_report(report):
                 _line(f"{GREEN}[-] WAF Active:{RESET}   {BOLD}No{RESET} — all {len(passed)} attack payloads passed through")
             else:
                 _line(f"{GREEN}[-] WAF Active:{RESET}   {BOLD}No{RESET}")
+
+    # Protection gap analysis — highlight unprotected critical categories
+    if blocked or passed:
+        passed_cats = []
+        blocked_cats = []
+        for p in passed:
+            cat = _ATTACK_CATEGORIES.get(p["description"])
+            if cat:
+                passed_cats.append(cat)
+        for b in blocked:
+            cat = _ATTACK_CATEGORIES.get(b["description"])
+            if cat:
+                blocked_cats.append(cat)
+        critical_gaps = [c for c in passed_cats if c in _CRITICAL_CATEGORIES]
+        if critical_gaps:
+            _line(f"{RED}[!] Unprotected:{RESET}  {BOLD}{', '.join(critical_gaps)}{RESET} — {RED}critical attack vectors not blocked{RESET}")
 
     if cdn_names:
         unique_cdn = list(dict.fromkeys(cdn_names))
@@ -3973,14 +4224,24 @@ def _print_report(report):
         for c in report["cnames"]:
             _line(f"→ {c}")
 
-    # WAF/CDN
+    # WAF/CDN/Server detections
     if report.get("waf"):
-        _section("WAF/CDN Detected", RED)
+        has_real_waf = any(d["category"] in ("WAF", "CDN/WAF") for d in report["waf"])
+        section_title = "WAF/CDN Detected" if has_real_waf else "Detections"
+        _section(section_title, RED if has_real_waf else YELLOW)
         for det in report["waf"]:
             cat = det["category"]
-            color = RED if cat in ("WAF", "CDN/WAF") else YELLOW
+            if cat == "Web Server":
+                color = DIM
+                label = "Server"
+            elif cat in ("WAF", "CDN/WAF"):
+                color = RED
+                label = cat
+            else:
+                color = YELLOW
+                label = cat
             conf_pct = f"{det['confidence']:.0%}"
-            _line(f"{color}{det['name']:<22}{RESET} {DIM}[{cat:<10}]{RESET} conf={BOLD}{conf_pct}{RESET}")
+            _line(f"{color}{det['name']:<22}{RESET} {DIM}[{label:<10}]{RESET} conf={BOLD}{conf_pct}{RESET}")
             if det.get("evidence"):
                 _line(f"   {DIM}evidence: {', '.join(det['evidence'][:3])}{RESET}")
 

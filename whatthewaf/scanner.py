@@ -191,13 +191,15 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
         ep = error_pages.probe_error_pages(url, timeout=timeout, user_agent=user_agent, proxy=proxy)
         report["error_pages"] = ep
 
-        # Merge WAF detections from error pages
+        # Merge WAF detections from error pages (preserve original category)
         homepage_waf_names = {d["name"] for d in report.get("waf", [])}
+        sig_categories = {s["name"]: s["category"] for s in waf_signatures.SIGNATURES}
         for probe in ep.get("probes", []):
             for waf_name in probe.get("waf_hits", []):
                 if waf_name not in homepage_waf_names:
+                    original_cat = sig_categories.get(waf_name, "WAF")
                     report["waf"].append({
-                        "name": waf_name, "category": "WAF", "confidence": 0.5,
+                        "name": waf_name, "category": original_cat, "confidence": 0.5,
                         "evidence": [f"error page {probe['path']} [{probe.get('status', '?')}]"],
                     })
                     homepage_waf_names.add(waf_name)
@@ -301,6 +303,10 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
     if report["waf_detected"]:
         waf_names = [d["name"] for d in report["waf"] if d["category"] in ("WAF", "CDN/WAF")]
         parts.append(f"WAF: {', '.join(waf_names)}")
+    else:
+        server_names = [d["name"] for d in report["waf"] if d["category"] == "Web Server"]
+        if server_names:
+            parts.append(f"Server Hardening: {', '.join(server_names)} (no WAF)")
     if report["origin_candidates"]:
         parts.append(f"{len(report['origin_candidates'])} potential origin IP(s)")
     bypass_findings = report.get("waf_bypass", {}).get("findings", [])
