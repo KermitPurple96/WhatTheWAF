@@ -560,7 +560,21 @@ def build_insights(report):
     # 4. No WAF insights
     if not real_wafs:
         server_only = [n for n in waf_names if waf_categories.get(n) == "Web Server"]
-        if server_only and passed_attacks:
+        is_saas = plat.get("is_saas", False)
+        platform_name = plat.get("platform_name", "")
+
+        if is_saas and blocked_attacks and passed_attacks:
+            insights.append(
+                f"No WAF — {platform_name} has built-in platform protection that blocks some "
+                f"attacks ({len(blocked_attacks)}/{len(blocked_attacks)+len(passed_attacks)}) "
+                f"but this is not a configurable WAF. Unblocked payloads reach the app."
+            )
+        elif is_saas and not blocked_attacks and passed_attacks:
+            insights.append(
+                f"No WAF — {platform_name} does not block any attack payloads. "
+                f"Customer cannot add server-level protections on provider-hosted SaaS."
+            )
+        elif server_only and passed_attacks:
             insights.append(
                 "No WAF — only server-level file access controls. "
                 "Attack payloads reach the application directly."
@@ -598,9 +612,9 @@ def build_insights(report):
                 f"and the customer cannot restrict it to only accept traffic from {ext_names}. "
                 "Direct access to the origin bypasses the external WAF entirely."
             )
-        elif not real_wafs and passed_attacks:
+        elif not real_wafs and passed_attacks and not blocked_attacks:
             insights.append(
-                f"{platform_name} has no effective WAF — attack payloads pass through. "
+                f"{platform_name} has no WAF — all attack payloads pass through. "
                 f"Customer cannot add server-level protections on provider-hosted SaaS."
             )
     elif plat.get("hosting_type") == "paas" and platform_name:

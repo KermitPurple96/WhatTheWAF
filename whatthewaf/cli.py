@@ -4268,11 +4268,23 @@ def _print_report(report):
             for p in passed:
                 _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
     else:
-        if blocked:
-            _line(f"{YELLOW}[+] WAF Detected:{RESET} {BOLD}Unknown WAF{RESET} (no signature match)")
-            _line(f"{RED}[+] WAF Active:{RESET}   {GREEN}YES{RESET} — blocking {len(blocked)}/{len(blocked)+len(passed)} attack payloads")
+        # No WAF signature, no server hardening detected
+        plat = report.get("platform", {})
+        if blocked and plat.get("is_saas"):
+            # SaaS platform blocking some attacks — this is platform-level protection, not a WAF
+            pname = plat.get("platform_name", "Platform")
+            _line(f"{YELLOW}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
+            _line(f"{YELLOW}[~] Platform Blocking:{RESET} {BOLD}{pname}{RESET} blocks {len(blocked)}/{len(blocked)+len(passed)} payloads — {DIM}built-in platform protection, not a configurable WAF{RESET}")
             for b in blocked:
-                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']}")
+                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']} {DIM}({pname}){RESET}")
+            for p in passed:
+                _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
+        elif blocked:
+            # Blocks exist but no WAF signature — server itself is blocking
+            _line(f"{YELLOW}[-] WAF Detected:{RESET} {BOLD}No{RESET}")
+            _line(f"{YELLOW}[~] Server Blocking:{RESET} {len(blocked)}/{len(blocked)+len(passed)} payloads blocked — {DIM}server-level input validation, not a WAF{RESET}")
+            for b in blocked:
+                _line(f"    {RED}BLOCKED{RESET} [{b['status']}] {b['description']} {DIM}(server){RESET}")
             for p in passed:
                 _line(f"    {YELLOW}PASSED{RESET}  [{p['status']}] {p['description']}")
         else:
