@@ -4179,10 +4179,25 @@ def _waf_active_analysis(report):
         status = p.get("status", 0)
         entry = {"path": p["path"], "description": p["description"],
                  "status": status, "waf_hits": p.get("waf_hits", [])}
+
         if status in waf_trigger_statuses:
             blocked.append(entry)
         elif status in redirect_statuses:
-            redirected.append(entry)
+            # Check if redirect was followed (payload preserved → final status available)
+            if p.get("redirect_payload_stripped"):
+                entry["redirect_note"] = "payload stripped"
+                redirected.append(entry)
+            elif p.get("final_status"):
+                # Redirect was followed — use final status for verdict
+                entry["final_status"] = p["final_status"]
+                entry["redirect_note"] = "followed"
+                if p["final_status"] in waf_trigger_statuses:
+                    entry["status"] = p["final_status"]
+                    blocked.append(entry)
+                else:
+                    passed.append(entry)
+            else:
+                redirected.append(entry)
         else:
             passed.append(entry)
 
@@ -4440,11 +4455,20 @@ def _print_report(report):
                     icon, color = "⊘", RED
                     verdict = f"{RED}BLOCKED{RESET}{blocker}"
                 elif st == 200:
-                    icon, color = "✓", GREEN
-                    verdict = f"{YELLOW}PASSED{RESET}"
+                    # Check if this was a followed redirect that ended in 200
+                    if p.get("final_status") == 200:
+                        icon, color = "✓", GREEN
+                        verdict = f"{YELLOW}PASSED{RESET} {DIM}(redirect followed → 200){RESET}"
+                    else:
+                        icon, color = "✓", GREEN
+                        verdict = f"{YELLOW}PASSED{RESET}"
                 elif st in (301, 302, 307, 308):
-                    icon, color = "→", YELLOW
-                    verdict = f"{YELLOW}REDIRECT{RESET} {DIM}(payload not blocked, server redirected){RESET}"
+                    if p.get("redirect_payload_stripped"):
+                        icon, color = "→", DIM
+                        verdict = f"{DIM}REDIRECT{RESET} {DIM}(payload stripped — inconclusive){RESET}"
+                    else:
+                        icon, color = "→", YELLOW
+                        verdict = f"{YELLOW}REDIRECT{RESET} {DIM}(inconclusive){RESET}"
                 else:
                     icon, color = "·", DIM
                     verdict = f"{DIM}[{st}]{RESET}"

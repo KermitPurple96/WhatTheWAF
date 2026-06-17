@@ -389,7 +389,13 @@ def _select_probes(server_header="", cnames=None, platform=None):
 
 
 def _fetch_probe(url, path, timeout=8, user_agent=None, proxy=None):
-    """Fetch a single probe path and return response data."""
+    """Fetch a single probe path and return response data.
+
+    On redirects (301/302/307/308): checks if the payload is preserved in the
+    Location header. If preserved, follows the redirect to get the final status
+    (the WAF may block after redirect). If stripped, returns the redirect as-is
+    with redirect_payload_stripped=True.
+    """
     probe_url = url.rstrip("/") + path
     try:
         client_kwargs = {
@@ -407,16 +413,55 @@ def _fetch_probe(url, path, timeout=8, user_agent=None, proxy=None):
         headers = dict(resp.headers)
         set_cookies = resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else []
         cookies = set_cookies if set_cookies else [f"{k}={v}" for k, v in resp.cookies.items()]
+        body = resp.text[:100000]
 
-        body = resp.text[:100000]  # cap at 100KB for error pages
-
-        return {
+        result = {
             "url": probe_url,
             "status": resp.status_code,
             "headers": headers,
             "cookies": cookies,
             "body": body,
         }
+
+        # On redirect: check if payload is preserved and follow if so
+        if resp.status_code in (301, 302, 307, 308):
+            location = headers.get("location", headers.get("Location", ""))
+            # Extract the "dangerous" part of the path (query string or path payload)
+            from urllib.parse import urlparse, parse_qs
+            original = urlparse(probe_url)
+            payload_parts = []
+            if original.query:
+                payload_parts.append(original.query)
+            # Check path-based payloads (e.g. /<script>)
+            dangerous_path_chars = {"'", '"', "<", ">", ";", "|", ".."}
+            if any(c in original.path for c in dangerous_path_chars):
+                payload_parts.append(original.path)
+
+            if location and payload_parts:
+                loc_lower = location.lower()
+                payload_preserved = any(p.lower() in loc_lower for p in payload_parts)
+                result["redirect_location"] = location
+                result["redirect_payload_preserved"] = payload_preserved
+
+                if payload_preserved:
+                    # Payload kept in redirect — follow to see if WAF blocks after redirect
+                    try:
+                        follow_kw = dict(client_kwargs)
+                        follow_kw["follow_redirects"] = True
+                        with httpx.Client(**follow_kw) as client2:
+                            resp2 = client2.get(probe_url)
+                        result["final_status"] = resp2.status_code
+                        result["final_url"] = str(resp2.url)
+                        # Use the final status for WAF analysis
+                        result["status"] = resp2.status_code
+                        result["headers"] = dict(resp2.headers)
+                        result["body"] = resp2.text[:100000]
+                    except Exception:
+                        pass  # keep original redirect status
+                else:
+                    result["redirect_payload_stripped"] = True
+
+        return result
     except Exception as e:
         return {"url": probe_url, "error": str(e)}
 
