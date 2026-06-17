@@ -730,25 +730,47 @@ def _norm(name):
 
 
 def _deduplicate(nodes):
-    """Remove redundant nodes — e.g. 'nginx' detected as both proxy and server."""
-    seen_norms = {}
+    """Remove redundant nodes — e.g. 'nginx' detected as both cache and proxy."""
+    # Known aliases — different detection names that refer to the same component
+    _ALIASES = {
+        "nginx cache": "nginx",
+        "nginx": "nginx",
+        "openresty": "openresty",
+        "varnish cache": "varnish",
+        "varnish": "varnish",
+    }
+
+    def _dedup_key(name):
+        """Get dedup key — check aliases first, fall back to norm."""
+        name_lower = name.lower().strip()
+        for alias, canonical in _ALIASES.items():
+            if alias in name_lower:
+                return canonical
+        return _norm(name)
+
+    seen = {}
     result = []
     for n in nodes:
-        key = _norm(n["name"])
-        if key in seen_norms:
-            existing = seen_norms[key]
-            # Keep the one at the more specific layer (deeper in stack)
+        key = _dedup_key(n["name"])
+        if key in seen:
+            existing = seen[key]
             existing_order = LAYER_ORDER.index(existing["layer"]) if existing["layer"] in LAYER_ORDER else 99
             new_order = LAYER_ORDER.index(n["layer"]) if n["layer"] in LAYER_ORDER else 99
+            # Merge evidence into the winner
             if n["confidence"] > existing["confidence"]:
+                n["evidence"] = list(dict.fromkeys(existing["evidence"] + n["evidence"]))
                 result[result.index(existing)] = n
-                seen_norms[key] = n
+                seen[key] = n
             elif new_order > existing_order and n["confidence"] >= existing["confidence"] * 0.8:
-                # Prefer deeper layer if confidence is close
+                n["evidence"] = list(dict.fromkeys(existing["evidence"] + n["evidence"]))
                 result[result.index(existing)] = n
-                seen_norms[key] = n
+                seen[key] = n
+            else:
+                # Keep existing but merge new evidence into it
+                existing["evidence"] = list(dict.fromkeys(existing["evidence"] + n["evidence"]))
+                existing["confidence"] = max(existing["confidence"], n["confidence"])
         else:
-            seen_norms[key] = n
+            seen[key] = n
             result.append(n)
     return result
 
