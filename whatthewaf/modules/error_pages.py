@@ -185,6 +185,12 @@ def _select_probes(server_header="", cnames=None, platform=None):
     if not is_saas and detected_tech & SAAS_PLATFORMS:
         is_saas = True
 
+    # Servers commonly used as reverse proxies — backend tech is unknown,
+    # so we probe everything to discover what's behind them
+    _PROXY_SERVERS = {"nginx", "openresty", "caddy", "envoy", "haproxy",
+                      "traefik", "varnish", "istio-envoy"}
+    is_proxy = bool(detected_tech & _PROXY_SERVERS) or not detected_tech
+
     # 3. Select probes
     selected = []
     for entry in PROBES:
@@ -197,6 +203,11 @@ def _select_probes(server_header="", cnames=None, platform=None):
 
         if is_saas:
             # SaaS: skip file access probes (provider controls server config)
+            continue
+
+        if is_proxy:
+            # Proxy/reverse proxy detected — probe everything, backend is unknown
+            selected.append((path, desc, trigger))
             continue
 
         if relevant is None:
