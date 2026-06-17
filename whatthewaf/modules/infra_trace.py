@@ -152,10 +152,9 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("server", "nginx", 0.6),
         ("error_page", "nginx", 0.7),
     ]),
-    ("Apache (proxy)", "proxy", [
-        ("server", "apache", 0.5),
-        # Lower confidence — could be origin too
-    ]),
+    # NOTE: Apache removed as proxy — it's almost always the origin server.
+    # When Apache IS behind a proxy (nginx/openresty), error_page detection
+    # correctly identifies it as SERVER layer.
     ("Envoy", "proxy", [
         ("server", "envoy", 0.9),
         ("header", "x-envoy-upstream-service-time", 0.9),
@@ -235,25 +234,22 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
     ]),
 
     # ── Web Servers (origin) ─────────────────────────────────
+    # NOTE: "apache" error_page pattern must NOT match "apache tomcat"
+    # The _detect_error_server output "Apache" (without "Tomcat") is safe to match
     ("Apache", "server", [
-        ("error_page", "apache", 0.9),
+        ("error_page", "apache", 0.9),  # matches _detect_error_server output "Apache x.x"
         ("header_value", "server", "apache", 0.7),
-    ]),
-    ("nginx", "server", [
-        ("error_page", "nginx", 0.8),
     ]),
     ("Microsoft IIS", "server", [
         ("server", "microsoft-iis", 0.9),
         ("header", "x-aspnet-version", 0.8),
         ("header_value", "x-powered-by", "asp.net", 0.8),
         ("error_page", "iis", 0.9),
+        ("error_page", "microsoft iis", 0.9),
     ]),
     ("LiteSpeed", "server", [
         ("server", "litespeed", 0.9),
         ("error_page", "litespeed", 0.8),
-    ]),
-    ("OpenResty", "server", [
-        ("error_page", "openresty", 0.8),
     ]),
 
     # ── App Servers / Runtimes ───────────────────────────────
@@ -309,8 +305,10 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("cookie", "_rails_session", 0.8),
         ("cookie", "rack.session", 0.8),
         ("server", "puma", 0.9),
-        ("server", "unicorn", 0.8),
+        # NOTE: "unicorn" removed — substring matches "gunicorn" (Python).
+        # Unicorn (Ruby) is rare; Puma/Passenger/Rails cookies cover Ruby detection.
         ("server", "thin", 0.8),
+        ("server", "passenger", 0.8),
     ]),
 
     # ── Frameworks ───────────────────────────────────────────
@@ -333,6 +331,7 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
     ]),
     ("Spring Boot", "framework", [
         ("error_page", "whitelabel error page", 0.9),
+        ("error_page", "spring boot", 0.9),
         ("header", "x-application-context", 0.8),
     ]),
     ("Ruby on Rails", "framework", [
@@ -341,10 +340,12 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("header", "x-request-id", 0.3),
         ("error_page", "action_controller", 0.9),
         ("error_page", "routing error", 0.8),
+        ("error_page", "ruby on rails", 0.9),
     ]),
     ("Express.js", "framework", [
         ("header_value", "x-powered-by", "express", 0.9),
         ("error_page", "cannot get", 0.7),
+        ("error_page", "express.js", 0.9),
     ]),
     ("Next.js", "framework", [
         ("header", "x-nextjs-page", 0.9),
@@ -515,15 +516,26 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                         match = True
                         evidence.append(f"header:{hdr_name}={val[:50]}")
                     elif hdr_pattern.lower() in val.lower():
-                        match = True
-                        evidence.append(f"header:{hdr_name}={val[:50]}")
+                        # Guard against "apache" matching "apache tomcat"
+                        val_lower = val.lower()
+                        if hdr_pattern.lower() == "apache" and "tomcat" in val_lower:
+                            pass
+                        else:
+                            match = True
+                            evidence.append(f"header:{hdr_name}={val[:50]}")
 
             elif sig_type == "server":
                 pattern = signal[1]
-                if pattern.lower() in server_hdr.lower():
-                    match = True
-                    evidence.append(f"server:{server_hdr}")
-                elif any(pattern.lower() in s for s in error_servers):
+                srv_lower = server_hdr.lower()
+                pat_lower = pattern.lower()
+                # Avoid "apache" matching "apache tomcat"
+                if pat_lower in srv_lower:
+                    if pat_lower == "apache" and "tomcat" in srv_lower:
+                        pass  # skip — it's Tomcat, not Apache httpd
+                    else:
+                        match = True
+                        evidence.append(f"server:{server_hdr}")
+                if not match and any(pat_lower in s for s in error_servers):
                     match = True
                     evidence.append(f"error-page-server:{pattern}")
 
@@ -566,9 +578,20 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
 
             elif sig_type == "error_page":
                 pattern = signal[1]
-                if pattern.lower() in error_bodies.lower():
-                    match = True
-                    evidence.append(f"error-page:{pattern}")
+                pat_lower = pattern.lower()
+                eb_lower = error_bodies.lower()
+                if pat_lower in eb_lower:
+                    # Avoid false matches: "apache" should not match "apache tomcat"
+                    # Check if the match is a standalone occurrence, not part of a longer tech name
+                    _false_positive = False
+                    if pat_lower == "apache" and "apache tomcat" in eb_lower:
+                        _false_positive = True
+                    elif pat_lower == "nginx" and "openresty" in eb_lower:
+                        # nginx error page inside openresty = openresty, not separate nginx
+                        _false_positive = True
+                    if not _false_positive:
+                        match = True
+                        evidence.append(f"error-page:{pattern}")
 
             elif sig_type == "cert_issuer":
                 pattern = signal[1]
@@ -618,8 +641,13 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
 
     # ─── Server header as fallback ───
+    # Normalize for dedup: strip version, convert dashes/underscores to spaces
+    def _norm(s):
+        return re.sub(r'[/_-].*', '', s).replace('-', ' ').replace('_', ' ').lower().strip()
+    _srv_norm = _norm(server_hdr)
     if server_hdr and not any(
-        server_hdr.lower() in d["name"].lower() or d["name"].lower() in server_hdr.lower()
+        _srv_norm in _norm(d["name"]) or _norm(d["name"]) in _srv_norm
+        or server_hdr.lower() in d["name"].lower() or d["name"].lower() in server_hdr.lower()
         for d in detections.values()
     ):
         # Determine layer based on server type
