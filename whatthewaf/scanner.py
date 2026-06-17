@@ -454,6 +454,7 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
             "headers": cdn_resp["headers"],
             "body_hash": hashlib.sha256(cdn_resp["body"].encode("utf-8", errors="replace")).hexdigest()[:16],
             "body_length": len(cdn_resp["body"]),
+            "body": cdn_resp["body"],
         }
         report["waf_via_cdn"] = waf_signatures.detect_waf(
             cdn_resp["headers"], cdn_resp["cookies"], cdn_resp["body"], cdn_resp["status"]
@@ -658,22 +659,13 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
     direct_hash = report.get("direct_https", {}).get("body_hash")
     same_hash = cdn_hash and direct_hash and cdn_hash == direct_hash
 
-    # Fuzzy comparison: if hashes differ, check if it's just dynamic tokens (CSRF, nonces, timestamps)
+    # Fuzzy comparison: if hashes differ, check if it's just dynamic tokens
     if not same_hash and cdn_hash and direct_hash:
-        cdn_body = report.get("cdn_response", {}).get("body_text", "")
-        if not cdn_body:
-            # Try to get from the fetch — we need to compare structural content
-            pass
-        direct_body_raw = report.get("direct_https", {}).get("body", "")
-        cdn_body_raw = ""
-        # Re-fetch CDN body isn't available in report, but we can compare lengths and titles
         cdn_length = report.get("cdn_response", {}).get("body_length", 0)
         direct_length = report.get("direct_https", {}).get("body_length", 0)
-        cdn_title = ""  # not stored yet
-        direct_title_val = report.get("direct_https", {}).get("title", "") or ""
+        direct_body_raw = report.get("direct_https", {}).get("body", "")
 
-        # If body lengths are very close (within 1% or 100 bytes) and same status code,
-        # it's likely the same page with dynamic tokens
+        # Method 1: body length comparison (catches minor differences)
         if cdn_length and direct_length:
             length_diff = abs(cdn_length - direct_length)
             length_ratio = length_diff / max(cdn_length, direct_length, 1)
@@ -684,6 +676,48 @@ def direct_ip_scan(domain, ip, timeout=10, user_agent=None, on_status=None, path
                     f"Fuzzy match: body lengths differ by {length_diff} bytes ({length_ratio:.1%}) "
                     f"— likely same page with dynamic tokens (CSRF, nonces)"
                 )
+
+        # Method 2: HTML title comparison (catches same page with different dynamic content)
+        if not same_hash and cdn_status == direct_status:
+            direct_title_val = report.get("direct_https", {}).get("title", "") or ""
+            # Extract title from CDN body if we have it
+            cdn_body_stored = report.get("cdn_response", {}).get("body", "")
+            cdn_title_val = ""
+            if cdn_body_stored:
+                import re as _re
+                _m = _re.search(r'<title[^>]*>(.*?)</title>', cdn_body_stored, _re.I | _re.DOTALL)
+                if _m:
+                    cdn_title_val = _m.group(1).strip()
+            if direct_title_val and cdn_title_val and direct_title_val == cdn_title_val:
+                same_hash = True
+                report["hash_match_fuzzy"] = True
+                report["hash_match_note"] = (
+                    f"Title match: both pages have title '{direct_title_val[:60]}' "
+                    f"— same page, body differs by dynamic content"
+                )
+
+        # Method 3: visible text comparison (strips HTML, compares text content)
+        if not same_hash and direct_body_raw and cdn_status == direct_status:
+            cdn_body_stored = report.get("cdn_response", {}).get("body", "")
+            if cdn_body_stored:
+                import re as _re
+                def _text(html):
+                    t = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.I | _re.DOTALL)
+                    t = _re.sub(r'<style[^>]*>.*?</style>', '', t, flags=_re.I | _re.DOTALL)
+                    t = _re.sub(r'<[^>]+>', ' ', t)
+                    return ' '.join(t.split()).strip()[:2000]
+                cdn_text = _text(cdn_body_stored)
+                direct_text = _text(direct_body_raw)
+                if cdn_text and direct_text:
+                    text_hash_cdn = hashlib.sha256(cdn_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+                    text_hash_direct = hashlib.sha256(direct_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+                    if text_hash_cdn == text_hash_direct:
+                        same_hash = True
+                        report["hash_match_fuzzy"] = True
+                        report["hash_match_note"] = (
+                            f"Text content match: visible text is identical "
+                            f"(HTML differs by scripts/styles/tokens)"
+                        )
 
     # Detect default/parking pages (not real content from the target domain)
     default_vhost_signatures = [
