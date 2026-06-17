@@ -185,10 +185,14 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
         else:
             report["http"] = {"error": resp.get("error", "unknown")}
 
-    # 4. Error page probing
+    # 4. Error page probing (filtered by detected server/platform)
     if _should_run("errors"):
         status("errors", "Probing error pages for WAF signatures")
-        ep = error_pages.probe_error_pages(url, timeout=timeout, user_agent=user_agent, proxy=proxy)
+        server_hdr = report.get("http", {}).get("server", "")
+        ep = error_pages.probe_error_pages(
+            url, timeout=timeout, user_agent=user_agent, proxy=proxy,
+            server_header=server_hdr, cnames=report.get("cnames", []),
+        )
         report["error_pages"] = ep
 
         # Merge WAF detections from error pages (preserve original category)
@@ -338,7 +342,7 @@ _ASN_TO_WAF = {
     "imperva": ("Imperva Incapsula", "WAF"),
     "sucuri": ("Sucuri", "WAF"),
     "cloudfront": ("AWS CloudFront", "CDN"),
-    "fastly": ("Fastly", "CDN"),
+    "fastly": ("Fastly", "CDN/WAF"),
     "stackpath": ("StackPath", "CDN/WAF"),
     "ddos-guard": ("DDoS-Guard", "WAF"),
     "radware": ("Radware AppWall", "WAF"),

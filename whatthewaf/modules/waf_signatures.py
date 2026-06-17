@@ -106,7 +106,7 @@ SIGNATURES = [
     # --- Fastly ---
     {
         "name": "Fastly",
-        "category": "CDN",
+        "category": "CDN/WAF",
         "headers": [("x-fastly-request-id", None), ("fastly-debug-digest", None), ("x-served-by", "cache-")],
         "cookies": [],
         "body": [r"fastly.error"],

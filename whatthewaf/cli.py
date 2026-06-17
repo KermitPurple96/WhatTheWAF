@@ -4072,7 +4072,9 @@ def _waf_active_analysis(report):
             continue
         status = p.get("status", 0)
         has_waf_hit = bool(p.get("waf_hits"))
-        is_blocked = status in waf_trigger_statuses or has_waf_hit
+        # A WAF hit on a blocking status (403, 429, etc.) = blocked.
+        # A WAF hit on a 200 just means the WAF/CDN is present, not that it blocked.
+        is_blocked = status in waf_trigger_statuses or (has_waf_hit and status not in (200, 201, 301, 302))
         entry = {"path": p["path"], "description": p["description"],
                  "status": status, "waf_hits": p.get("waf_hits", [])}
         if is_blocked:
@@ -4198,12 +4200,26 @@ def _print_report(report):
         unique_cdn = list(dict.fromkeys(cdn_names))
         _line(f"{YELLOW}[*] CDN:{RESET}          {', '.join(unique_cdn)}")
 
+    # ── CONTEXTUAL INSIGHTS ──
+    from .modules.intel import build_insights, identify_server
+    insights = build_insights(report)
+    if insights:
+        _section("Insights", CYAN)
+        for insight in insights:
+            _line(f"{DIM}{insight}{RESET}")
+
     # HTTP
     http = report.get("http", {})
     if http and not http.get("error"):
         _section("HTTP Response", BLUE)
         _line(f"Status: {http.get('status', '?')}")
-        if http.get("server"): _line(f"Server: {CYAN}{http['server']}{RESET}")
+        server_header = http.get("server", "")
+        if server_header:
+            server_id = identify_server(server_header)
+            if server_id:
+                _line(f"Server: {CYAN}{server_header}{RESET} {DIM}({server_id[0]}){RESET}")
+            else:
+                _line(f"Server: {CYAN}{server_header}{RESET}")
         if http.get("url"): _line(f"URL:    {http['url']}")
     elif http.get("error"):
         print(f"\n  {RED}✗ HTTP Error: {http['error']}{RESET}")
@@ -4220,9 +4236,13 @@ def _print_report(report):
 
     # CNAME
     if report.get("cnames"):
+        from .modules.intel import identify_cname_platform
         _section("CNAME Chain", BLUE)
+        cname_platform = identify_cname_platform(report["cnames"])
         for c in report["cnames"]:
             _line(f"→ {c}")
+        if cname_platform:
+            _line(f"  {DIM}Platform: {cname_platform[0]} — {cname_platform[1]}{RESET}")
 
     # WAF/CDN/Server detections
     if report.get("waf"):
@@ -4252,20 +4272,55 @@ def _print_report(report):
             for ev in tier.get("evidence", []):
                 _line(f"   {DIM}  {ev}{RESET}")
 
-    # Error Pages
+    # Error Pages — split into attack payloads vs file access / error triggers
     ep = report.get("error_pages", {})
     ep_probes = ep.get("probes", [])
     if ep_probes:
         successful = [p for p in ep_probes if not p.get("error")]
-        if successful:
-            _section("Error Page Probes", YELLOW)
-            for p in successful:
+        attack_probes = [p for p in successful if p.get("trigger") == "waf"]
+        access_probes = [p for p in successful if p.get("trigger") != "waf"]
+
+        if attack_probes:
+            _section("Attack Payload Probes", RED)
+            _line(f"{DIM}Real attack payloads — 403 = WAF blocked, 200 = passed through{RESET}")
+            for p in attack_probes:
+                st = p.get("status", "?")
+                waf_trigger_statuses = {403, 406, 429, 451, 493, 503}
+                has_waf_hit = bool(p.get("waf_hits"))
+                is_blocked = st in waf_trigger_statuses or (has_waf_hit and st not in (200, 201, 301, 302))
+                if is_blocked:
+                    icon, color = "⊘", RED
+                    verdict = f"{RED}BLOCKED{RESET}"
+                elif st == 200:
+                    icon, color = "✓", GREEN
+                    verdict = f"{YELLOW}PASSED{RESET}"
+                else:
+                    icon, color = "·", DIM
+                    verdict = f"{DIM}[{st}]{RESET}"
+                _line(f"{color}{icon}{RESET} [{st}] {verdict} {p['path']:<40} {DIM}{p['description']}{RESET}")
+
+        is_saas = ep.get("is_saas", False)
+        if is_saas and not access_probes:
+            _section("File Access Probes", DIM)
+            _line(f"{DIM}Skipped — provider-hosted SaaS (server config not controlled by customer){RESET}")
+        elif access_probes:
+            _section("File Access & Error Probes", YELLOW)
+            _line(f"{DIM}Server path access — 403/404 = normal server config, not WAF blocking{RESET}")
+            # Collect globally-detected WAF/CDN names to filter out redundant tags
+            global_waf_names = {d["name"] for d in report.get("waf", [])}
+            for p in access_probes:
                 st = p.get("status", "?")
                 if st == 200: icon, color = "✓", GREEN
-                elif st == 403: icon, color = "⊘", YELLOW
+                elif st in (403, 400): icon, color = "·", DIM
+                elif st == 404: icon, color = "·", DIM
                 elif isinstance(st, int) and st >= 500: icon, color = "✗", RED
                 else: icon, color = "·", DIM
-                waf_str = f"  {RED}← WAF: {', '.join(p['waf_hits'])}{RESET}" if p.get("waf_hits") else ""
+                # Only show WAF tag if it's a NEW detection not already known globally
+                waf_str = ""
+                if p.get("waf_hits"):
+                    new_hits = [w for w in p["waf_hits"] if w not in global_waf_names]
+                    if new_hits:
+                        waf_str = f"  {RED}← NEW: {', '.join(new_hits)}{RESET}"
                 _line(f"{color}{icon} [{st}]{RESET} {p['path']:<40} {DIM}{p['description']}{RESET}{waf_str}")
 
     # TLS Fingerprint

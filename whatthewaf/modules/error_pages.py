@@ -14,31 +14,203 @@ from . import waf_signatures
 from ..constants import DEFAULT_UA
 
 # Probes designed to trigger specific status codes and WAF reactions.
-# (path, description, expected_trigger)
+# (path, description, expected_trigger, relevant_tech)
+# relevant_tech: None = always probe, set = only if detected tech matches
 PROBES = [
-    # --- 404 triggers ---
-    ("/thispagedoesnotexist-wtw7x2q", "Non-existent path", "404"),
-    ("/WTW-404-test.php", "Non-existent PHP file", "404"),
-    ("/WTW-404-test.asp", "Non-existent ASP file", "404"),
+    # --- Generic 404 triggers (always) ---
+    ("/thispagedoesnotexist-wtw7x2q", "Non-existent path", "404", None),
 
-    # --- 403 triggers ---
-    ("/.htaccess", "Apache config file", "403"),
-    ("/.env", "Environment file", "403"),
-    ("/.git/config", "Git config", "403"),
-    ("/server-status", "Apache server-status", "403"),
-    ("/web.config", "IIS config file", "403"),
+    # --- Technology-specific 404 triggers ---
+    ("/WTW-404-test.php", "Non-existent PHP file", "404", {"apache", "nginx", "litespeed", "php", "openresty"}),
+    ("/WTW-404-test.asp", "Non-existent ASP file", "404", {"iis", "asp.net"}),
+    ("/WTW-404-test.jsp", "Non-existent JSP file", "404", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty"}),
 
-    # --- 500 triggers ---
-    ("/%00", "Null byte in URL", "500"),
-    ("/%%", "Double percent encoding", "500"),
+    # --- Generic file exposure (any server) ---
+    ("/.env", "Environment file", "403", None),
+    ("/.git/config", "Git config", "403", None),
 
-    # --- WAF trigger payloads (look malicious to WAFs) ---
-    ("/?id=1'+OR+1=1--", "SQL injection probe", "waf"),
-    ("/<script>alert(1)</script>", "XSS probe", "waf"),
-    ("/?file=../../../etc/passwd", "Path traversal probe", "waf"),
-    ("/?cmd=;cat+/etc/passwd", "Command injection probe", "waf"),
-    ("/?page=php://filter/convert.base64-encode/resource=index", "PHP filter probe", "waf"),
+    # --- Apache / LiteSpeed ---
+    ("/.htaccess", "Apache config file", "403", {"apache", "litespeed"}),
+    ("/server-status", "Apache mod_status", "403", {"apache"}),
+    ("/server-info", "Apache mod_info", "403", {"apache"}),
+
+    # --- Nginx ---
+    ("/nginx.conf", "Nginx config file", "403", {"nginx", "openresty"}),
+
+    # --- IIS / ASP.NET ---
+    ("/web.config", "IIS config file", "403", {"iis", "asp.net"}),
+    ("/elmah.axd", "ASP.NET error log", "403", {"iis", "asp.net"}),
+    ("/trace.axd", "ASP.NET trace", "403", {"iis", "asp.net"}),
+
+    # --- Java (Tomcat, WildFly, WebLogic, Jetty, Spring) ---
+    ("/WEB-INF/web.xml", "Java deployment descriptor", "403", {"tomcat", "java", "wildfly", "weblogic", "websphere", "jetty"}),
+    ("/actuator", "Spring Boot Actuator", "403", {"spring", "java", "tomcat"}),
+    ("/actuator/health", "Spring Boot health endpoint", "403", {"spring", "java", "tomcat"}),
+    ("/manager/html", "Tomcat Manager", "403", {"tomcat"}),
+
+    # --- Node.js ---
+    ("/package.json", "Node.js package manifest", "403", {"node", "express", "deno"}),
+
+    # --- Python (Django, Flask) ---
+    ("/admin/", "Django admin", "403", {"django", "python"}),
+    ("/__debug__/", "Django Debug Toolbar", "403", {"django", "python"}),
+
+    # --- Ruby (Rails) ---
+    ("/rails/info/properties", "Rails info", "403", {"rails", "ruby"}),
+
+    # --- PHP frameworks ---
+    ("/phpinfo.php", "PHP info page", "403", {"php"}),
+    ("/wp-login.php", "WordPress login", "403", {"wordpress", "php"}),
+
+    # --- Generic error triggers ---
+    ("/%00", "Null byte in URL", "500", None),
+    ("/%%", "Double percent encoding", "500", None),
+
+    # --- WAF trigger payloads (always probed, including SaaS) ---
+    ("/?id=1'+OR+1=1--", "SQL injection probe", "waf", None),
+    ("/<script>alert(1)</script>", "XSS probe", "waf", None),
+    ("/?file=../../../etc/passwd", "Path traversal probe", "waf", None),
+    ("/?cmd=;cat+/etc/passwd", "Command injection probe", "waf", None),
+    ("/?page=php://filter/convert.base64-encode/resource=index", "PHP filter probe", "waf", None),
 ]
+
+# Provider-hosted SaaS — customer does NOT control server infrastructure.
+# File access probes are skipped (server config is the provider's, not reportable).
+# WAF attack probes always run (lack of WAF IS reportable).
+# NOTE: Self-hostable platforms (WordPress.org, Ghost OSS, GitLab) are NOT here —
+# if a client self-hosts them, everything is reportable.
+SAAS_PLATFORMS = {
+    # Website builders
+    "wix", "squarespace", "webflow", "weebly", "jimdo",
+    "strikingly", "tilda", "carrd", "webnode", "duda",
+    "site123", "format", "cargo", "readymag",
+    # E-commerce (provider-hosted)
+    "shopify", "bigcommerce", "volusion", "bigcartel", "ecwid",
+    "storenvy", "gumroad", "lemon squeezy", "sellfy",
+    # Blogging / CMS (provider-hosted only)
+    "wordpress.com", "medium", "blogger", "tumblr",
+    "substack", "ghost.io", "hashnode", "devto",
+    # Marketing / Landing pages
+    "hubspot", "unbounce", "leadpages", "instapage", "clickfunnels",
+    "mailchimp", "convertkit", "kajabi", "systeme",
+    # Support / CRM / SaaS apps
+    "zendesk", "freshdesk", "intercom", "helpscout",
+    "salesforce", "servicenow",
+    # Documentation
+    "notion.site", "gitbook", "readme.io", "archbee",
+    # Booking / Appointments
+    "calendly", "acuity",
+    # No-code apps
+    "bubble.io", "adalo", "glide", "softr",
+}
+
+# Server header keywords → detected technology set
+_SERVER_TECH_MAP = {
+    # Web servers
+    "apache": {"apache"}, "nginx": {"nginx"}, "litespeed": {"litespeed"},
+    "openresty": {"openresty", "nginx"}, "microsoft-iis": {"iis", "asp.net"},
+    "caddy": {"caddy"},
+    # Java (note: "apache tomcat" must not trigger apache httpd probes)
+    "apache tomcat": {"tomcat", "java"}, "tomcat": {"tomcat", "java"},
+    "jetty": {"jetty", "java"},
+    "wildfly": {"wildfly", "java"}, "jboss": {"wildfly", "java"},
+    "weblogic": {"weblogic", "java"}, "websphere": {"websphere", "java"},
+    "glassfish": {"java"}, "payara": {"java"},
+    # Python
+    "gunicorn": {"gunicorn", "python"}, "uvicorn": {"uvicorn", "python"},
+    "waitress": {"waitress", "python"}, "daphne": {"python", "django"},
+    "werkzeug": {"python", "flask"},
+    # Ruby
+    "puma": {"puma", "ruby", "rails"}, "thin": {"ruby", "rails"},
+    "passenger": {"passenger", "ruby"},
+    # Node.js
+    "express": {"express", "node"}, "deno": {"deno", "node"},
+    "next.js": {"node"}, "koa": {"node"},
+    # .NET
+    "kestrel": {"asp.net"},
+    # SaaS server headers (trigger SaaS detection)
+    "pepyaka": {"wix"}, "squarespace": {"squarespace"},
+    "shopify": {"shopify"}, "cowboy": {"cowboy", "elixir"},
+    # Proxies / LBs (don't filter probes — origin is behind them)
+    "envoy": set(), "istio-envoy": set(), "haproxy": set(),
+    "varnish": set(), "traefik": set(),
+}
+
+# CNAME keywords that indicate provider-hosted SaaS
+_SAAS_CNAME_KEYWORDS = {
+    "wixdns", "squarespace", "shopify", "myshopify",
+    "wordpress.com", "ghost.io", "medium.com",
+    "hubspot", "unbounce", "webflow.io",
+    "zendesk.com", "freshdesk.com",
+    "bigcommerce", "volusion",
+    "tilda.ws", "strikingly.com",
+}
+
+
+def _select_probes(server_header="", cnames=None, platform=None):
+    """Select relevant probes based on detected server/platform.
+
+    Returns (filtered_probes, is_saas):
+    - Provider-hosted SaaS: only WAF attack probes + generic error triggers
+      (file access probes not reportable — provider controls server config)
+    - Self-hosted / IaaS / PaaS: filter file access probes by detected technology
+    - Unknown server: include all probes (we don't know what's behind it)
+    """
+    # 1. Detect if this is a provider-hosted SaaS
+    is_saas = False
+    if platform and platform.lower() in SAAS_PLATFORMS:
+        is_saas = True
+    if not is_saas and cnames:
+        cname_str = " ".join(cnames).lower()
+        for keyword in _SAAS_CNAME_KEYWORDS:
+            if keyword in cname_str:
+                is_saas = True
+                break
+
+    # 2. Build detected tech set from server header
+    detected_tech = set()
+    server_lower = server_header.lower() if server_header else ""
+    # Match longer patterns first to avoid false positives
+    # (e.g. "apache tomcat" should NOT trigger "apache" httpd probes)
+    skip_keywords = set()
+    for keyword in sorted(_SERVER_TECH_MAP.keys(), key=len, reverse=True):
+        if keyword in skip_keywords:
+            continue
+        if keyword in server_lower:
+            detected_tech.update(_SERVER_TECH_MAP[keyword])
+            # "apache tomcat" / "apache traffic server" → skip bare "apache"
+            if keyword != "apache" and "apache" in keyword:
+                skip_keywords.add("apache")
+    # SaaS detection from server header
+    if not is_saas and detected_tech & SAAS_PLATFORMS:
+        is_saas = True
+
+    # 3. Select probes
+    selected = []
+    for entry in PROBES:
+        path, desc, trigger, relevant = entry[0], entry[1], entry[2], entry[3]
+
+        if trigger == "waf":
+            # WAF attack probes ALWAYS run — lack of WAF is reportable everywhere
+            selected.append((path, desc, trigger))
+            continue
+
+        if is_saas:
+            # SaaS: skip file access probes (provider controls server config)
+            continue
+
+        if relevant is None:
+            # Generic probe (e.g. .env, .git) — always relevant on non-SaaS
+            selected.append((path, desc, trigger))
+        elif detected_tech:
+            # Only include if detected technology matches
+            if relevant & detected_tech:
+                selected.append((path, desc, trigger))
+        else:
+            # Unknown server — include all probes
+            selected.append((path, desc, trigger))
+
+    return selected, is_saas
 
 
 def _fetch_probe(url, path, timeout=8, user_agent=None, proxy=None):
@@ -179,8 +351,16 @@ def _detect_error_server(status, headers, body):
     return detections
 
 
-def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8):
+def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8,
+                      server_header="", cnames=None, platform=None):
     """Probe error-triggering paths and analyze responses for WAF/tech leaks.
+
+    Probes are filtered dynamically based on detected technology:
+    - Server-specific probes only run for matching servers
+      (e.g. .htaccess only for Apache, web.config only for IIS)
+    - Provider-hosted SaaS (Wix, Shopify...): file access probes skipped
+      (customer doesn't control server config) but attack probes always run
+      (WAF status IS reportable — lack of WAF / WAF bypass)
 
     Returns dict with:
       - probes: list of per-probe results
@@ -188,20 +368,24 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
       - extra_tech: tech detections found only in error responses
       - server_leaks: server software revealed by error pages
       - status_map: mapping of triggered status codes
+      - is_saas: whether target is provider-hosted SaaS
     """
+    selected_probes, is_saas = _select_probes(server_header, cnames, platform)
+
     results = {
         "probes": [],
         "extra_waf": [],
         "extra_tech": [],
         "server_leaks": [],
         "status_map": {},
+        "is_saas": is_saas,
     }
 
-    # Fetch all probes in parallel
+    # Fetch selected probes in parallel
     probe_responses = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
-        for path, desc, trigger in PROBES:
+        for path, desc, trigger in selected_probes:
             fut = pool.submit(_fetch_probe, url, path, timeout, user_agent, proxy)
             futures[fut] = (path, desc, trigger)
 
@@ -217,7 +401,7 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
                 pass
 
     # Sort by path order for consistent output
-    path_order = {p[0]: i for i, p in enumerate(PROBES)}
+    path_order = {p[0]: i for i, p in enumerate(selected_probes)}
     probe_responses.sort(key=lambda r: path_order.get(r.get("path", ""), 999))
 
     # Track all seen WAF names to find extras
