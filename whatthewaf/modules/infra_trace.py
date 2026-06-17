@@ -621,12 +621,36 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
         server_hdr.lower() in d["name"].lower() or d["name"].lower() in server_hdr.lower()
         for d in detections.values()
     ):
+        # Determine layer based on server type
+        _server_lower = server_hdr.lower()
+        _proxy_keywords = {"nginx", "openresty", "envoy", "haproxy", "traefik", "varnish",
+                           "caddy", "tengine", "kong", "apisix"}
+        _server_keywords = {"apache", "iis", "litespeed", "tomcat", "jetty", "gunicorn",
+                            "uvicorn", "puma", "kestrel", "wildfly", "weblogic"}
+        if any(k in _server_lower for k in _proxy_keywords):
+            _fallback_layer = "proxy"
+        elif any(k in _server_lower for k in _server_keywords):
+            _fallback_layer = "server"
+        else:
+            _fallback_layer = "proxy"
         detections[server_hdr] = {
             "name": server_hdr,
-            "layer": "proxy",
+            "layer": _fallback_layer,
             "confidence": 0.5,
             "evidence": [f"server:{server_hdr}"],
         }
+
+    # ─── X-Backend / X-Upstream headers (reveal backend server behind proxy) ───
+    for backend_hdr in ("x-backend", "x-upstream", "x-served-by-backend",
+                         "x-origin-server", "x-real-server"):
+        val = _hdr(headers, backend_hdr) or error_headers_all.get(backend_hdr, "")
+        if val and val not in detections:
+            detections[f"backend:{val}"] = {
+                "name": val,
+                "layer": "server",
+                "confidence": 0.4,
+                "evidence": [f"header:{backend_hdr}={val}"],
+            }
 
     # ─── Hosting from ASN (if no hosting layer detected) ───
     has_hosting = any(d["layer"] == "hosting" for d in detections.values())

@@ -438,6 +438,12 @@ def _detect_error_server(status, headers, body):
             m = re.search(r"(apache/[\d.]+)", body_lower)
             if m:
                 detections.append(("Apache", m.group(1), "error page"))
+    # Apache default error pages (no version) — detect by HTML structure
+    # <!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"> + "Forbidden" / "Not Found"
+    elif (re.search(r'<!doctype html public.*ietf.*html 2\.0', body_lower) and
+          re.search(r'<h1>(forbidden|not found)</h1>', body_lower) and
+          "you don't have permission" in body_lower or "the requested url was not found" in body_lower):
+        detections.append(("Apache", "", "error page structure"))
 
     # Nginx error page signatures
     if re.search(r"<center>nginx/[\d.]+</center>", body_lower):
