@@ -1010,7 +1010,7 @@ def _run_recon(targets, args):
 
         source_status = {}  # source -> count or error
 
-        # 1. DNS A records
+        # 0. Resolve + platform detection (gates subsequent scans)
         if not is_json:
             sys.stderr.write(f"\r\033[K{DIM}  [~] DNS resolution{RESET}"); sys.stderr.flush()
         dns_info = dns_resolver.resolve_domain(domain)
@@ -1019,28 +1019,59 @@ def _run_recon(targets, args):
             _add(ip, "dns")
         source_status["dns"] = len(a_records)
 
+        # Platform detection — skip origin-hunting scans on SaaS/PaaS
+        from .modules.intel import detect_platform
+        _resp = None
+        try:
+            import httpx
+            with httpx.Client(timeout=args.timeout, follow_redirects=True, verify=False) as _c:
+                _resp = _c.get(f"https://{domain}")
+            _server_hdr = _resp.headers.get("server", "")
+        except Exception:
+            _server_hdr = ""
+        _platform = detect_platform(
+            server_header=_server_hdr,
+            cnames=dns_info.get("cnames", []),
+        )
+        if not is_json and _platform.get("platform_name"):
+            _ht = _platform["hosting_type"]
+            _label = {"saas": "provider-hosted SaaS", "paas": "PaaS", "managed": "managed hosting"}.get(_ht, "")
+            if _label:
+                print(f"  {DIM}Platform: {_platform['platform_name']} ({_label}){RESET}", file=sys.stderr)
+                if not _platform["origin_discoverable"]:
+                    print(f"  {YELLOW}Origin discovery skipped — {_platform['platform_name']} uses shared provider infrastructure{RESET}", file=sys.stderr)
+
+        # Origin-hunting scans — skip on SaaS/PaaS (shared infra, no real origin to find)
+        _origin_hunt = _platform.get("origin_discoverable", True)
+
         # 2. Subdomain leakage
-        if not is_json:
-            sys.stderr.write(f"\r\033[K{DIM}  [*] Subdomain leakage scan{RESET}"); sys.stderr.flush()
         cdn_ips = set()
         if a_records:
             asn_records = asn_lookup.lookup_asn_bulk(a_records)
             cdn_ips = {r["ip"] for r in asn_records if r["classification"] == "CDN"}
-        subs = origin_finder.find_origins(domain, cdn_ips=cdn_ips, timeout=args.timeout)
-        for c in subs:
-            if not c.get("is_cdn"):
-                _add(c["ip"], f"subdomain:{c.get('subdomain', '?')}")
-        source_status["subdomains"] = len([c for c in subs if not c.get("is_cdn")])
+        if _origin_hunt:
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [*] Subdomain leakage scan{RESET}"); sys.stderr.flush()
+            subs = origin_finder.find_origins(domain, cdn_ips=cdn_ips, timeout=args.timeout)
+            for c in subs:
+                if not c.get("is_cdn"):
+                    _add(c["ip"], f"subdomain:{c.get('subdomain', '?')}")
+            source_status["subdomains"] = len([c for c in subs if not c.get("is_cdn")])
+        else:
+            source_status["subdomains"] = "skipped (SaaS)"
 
         # 3. Historical DNS (ViewDNS + SecurityTrails)
-        if not is_json:
-            sys.stderr.write(f"\r\033[K{DIM}  [<] Historical DNS{RESET}"); sys.stderr.flush()
-        historical = origin_finder.fetch_historical_ips(domain, timeout=args.timeout)
-        for h in historical:
-            _add(h["ip"], f"history:{h.get('source', 'viewdns')}", last_seen=h.get("last_seen", ""))
-        source_status["historical_dns"] = len(historical)
+        if _origin_hunt:
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [<] Historical DNS{RESET}"); sys.stderr.flush()
+            historical = origin_finder.fetch_historical_ips(domain, timeout=args.timeout)
+            for h in historical:
+                _add(h["ip"], f"history:{h.get('source', 'viewdns')}", last_seen=h.get("last_seen", ""))
+            source_status["historical_dns"] = len(historical)
+        else:
+            source_status["historical_dns"] = "skipped (SaaS)"
 
-        # 4. SSL certificate
+        # 4. SSL certificate (always run — useful for platform classification)
         if not is_json:
             sys.stderr.write(f"\r\033[K{DIM}  [@] SSL certificate inspection{RESET}"); sys.stderr.flush()
         cert_info = None
@@ -1048,27 +1079,39 @@ def _run_recon(targets, args):
             cert_info = origin_finder.check_ssl_cert(a_records[0], domain, timeout=args.timeout)
 
         # 5. Favicon hash
-        if not is_json:
-            sys.stderr.write(f"\r\033[K{DIM}  [#] Favicon hash matching{RESET}"); sys.stderr.flush()
-        fav = origin_finder.fetch_favicon_hash(domain, timeout=args.timeout)
-        fav_results = []
-        if fav:
-            fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain, timeout=args.timeout)
-            for r in fav_results:
-                _add(r["ip"], f"favicon:{r['source']}", port=r.get("port"), hostnames=r.get("hostnames"),
-                     org=r.get("org", ""))
-        source_status["favicon"] = len(fav_results) if fav else "no favicon"
+        if _origin_hunt:
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [#] Favicon hash matching{RESET}"); sys.stderr.flush()
+            fav = origin_finder.fetch_favicon_hash(domain, timeout=args.timeout)
+            fav_results = []
+            if fav:
+                fav_results = origin_finder.search_by_favicon_hash(fav["hash"], domain=domain, timeout=args.timeout)
+                for r in fav_results:
+                    _add(r["ip"], f"favicon:{r['source']}", port=r.get("port"), hostnames=r.get("hostnames"),
+                         org=r.get("org", ""))
+            source_status["favicon"] = len(fav_results) if fav else "no favicon"
+        else:
+            source_status["favicon"] = "skipped (SaaS)"
 
         # 6. GitHub leaks
-        if not is_json:
-            sys.stderr.write(f"\r\033[K{DIM}  [G] GitHub leak search{RESET}"); sys.stderr.flush()
-        github = origin_finder.search_github_leaks(domain, timeout=args.timeout)
-        for r in github:
-            _add(r["ip"], "github", repo=r.get("repo", ""), context=r.get("context", "")[:100])
-        source_status["github"] = len(github)
+        if _origin_hunt:
+            if not is_json:
+                sys.stderr.write(f"\r\033[K{DIM}  [G] GitHub leak search{RESET}"); sys.stderr.flush()
+            github = origin_finder.search_github_leaks(domain, timeout=args.timeout)
+            for r in github:
+                _add(r["ip"], "github", repo=r.get("repo", ""), context=r.get("context", "")[:100])
+            source_status["github"] = len(github)
+        else:
+            source_status["github"] = "skipped (SaaS)"
 
-        # 7. Censys
-        if api_keys.get("censys_api_id") and api_keys.get("censys_api_secret"):
+        # 7. Censys (skip on SaaS — shared infra IPs are not actionable)
+        if not _origin_hunt:
+            source_status["censys"] = "skipped (SaaS)"
+            source_status["shodan"] = "skipped (SaaS)"
+            source_status["virustotal"] = "skipped (SaaS)"
+            source_status["whoxy"] = "skipped (SaaS)"
+            source_status["dnstrails"] = "skipped (SaaS)"
+        elif api_keys.get("censys_api_id") and api_keys.get("censys_api_secret"):
             if not is_json:
                 sys.stderr.write(f"\r\033[K{DIM}  [C] Censys certificate search{RESET}"); sys.stderr.flush()
             censys = origin_finder.search_censys(domain, timeout=args.timeout)
@@ -1079,7 +1122,7 @@ def _run_recon(targets, args):
             source_status["censys"] = "no key"
 
         # 8. Shodan
-        if api_keys.get("shodan_api_key"):
+        if _origin_hunt and api_keys.get("shodan_api_key"):
             if not is_json:
                 sys.stderr.write(f"\r\033[K{DIM}  [S] Shodan domain search{RESET}"); sys.stderr.flush()
             shodan = origin_finder.search_shodan_domain(domain, timeout=args.timeout)
@@ -1087,22 +1130,22 @@ def _run_recon(targets, args):
                 sub = r.get("subdomain", "")
                 _add(r["ip"], f"shodan" + (f":{sub}" if sub else ""), last_seen=r.get("last_seen", ""))
             source_status["shodan"] = len(shodan)
-        else:
+        elif _origin_hunt:
             source_status["shodan"] = "no key"
 
         # 9. VirusTotal
-        if api_keys.get("virustotal_api_key"):
+        if _origin_hunt and api_keys.get("virustotal_api_key"):
             if not is_json:
                 sys.stderr.write(f"\r\033[K{DIM}  [V] VirusTotal resolutions{RESET}"); sys.stderr.flush()
             vt = origin_finder.search_virustotal(domain, timeout=args.timeout)
             for r in vt:
                 _add(r["ip"], "virustotal", last_seen=r.get("last_seen", ""))
             source_status["virustotal"] = len(vt)
-        else:
+        elif _origin_hunt:
             source_status["virustotal"] = "no key"
 
         # 10. Whoxy (WHOIS + reverse WHOIS → sibling domains → IPs)
-        if api_keys.get("whoxy_api_key"):
+        if _origin_hunt and api_keys.get("whoxy_api_key"):
             if not is_json:
                 sys.stderr.write(f"\r\033[K{DIM}  [W] Whoxy reverse WHOIS{RESET}"); sys.stderr.flush()
             whoxy = origin_finder.search_whoxy(domain, timeout=args.timeout)
@@ -1111,11 +1154,11 @@ def _run_recon(targets, args):
             source_status["whoxy"] = len(whoxy.get("ips", []))
             if whoxy.get("sibling_domains"):
                 source_status["whoxy_siblings"] = len(whoxy["sibling_domains"])
-        else:
+        elif _origin_hunt:
             source_status["whoxy"] = "no key"
 
         # 11. DNSTrails
-        if api_keys.get("dnstrails_api_key"):
+        if _origin_hunt and api_keys.get("dnstrails_api_key"):
             if not is_json:
                 sys.stderr.write(f"\r\033[K{DIM}  [D] DNSTrails{RESET}"); sys.stderr.flush()
             dt = origin_finder.search_dnstrails(domain, timeout=args.timeout)
@@ -1123,7 +1166,7 @@ def _run_recon(targets, args):
                 label = r.get("subdomain", "") if r.get("type") == "subdomain" else "history"
                 _add(r["ip"], f"dnstrails:{label}")
             source_status["dnstrails"] = len(dt)
-        else:
+        elif _origin_hunt:
             source_status["dnstrails"] = "no key"
 
         _clear_status()
@@ -2052,10 +2095,17 @@ def _run_tls_audit(targets, args):
         result = tls_fingerprint.analyze_tls_fingerprint(
             domain, timeout=args.timeout, on_status=status_cb)
         _clear_status()
-        all_reports.append({"target": domain, "tls": result})
+
+        # Platform detection for context
+        from .modules.intel import detect_platform
+        from .modules import dns_resolver as _dns
+        _dns_info = _dns.resolve_domain(domain)
+        _platform = detect_platform(cnames=_dns_info.get("cnames", []))
+
+        all_reports.append({"target": domain, "tls": result, "platform": _platform})
 
         if not is_json:
-            _print_tls_report(domain, result)
+            _print_tls_report(domain, result, platform=_platform)
 
     if is_json:
         _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
@@ -2063,12 +2113,16 @@ def _run_tls_audit(targets, args):
         _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
 
 
-def _print_tls_report(domain, tls):
+def _print_tls_report(domain, tls, platform=None):
     """Print standalone TLS audit results."""
     W = max(len(domain) + 16, 60)
     print(f"\n{BOLD}{CYAN}╔{'═' * W}╗{RESET}")
     print(f"{BOLD}{CYAN}║  TLS Audit: {domain}{' ' * max(W - len(domain) - 14, 1)}║{RESET}")
     print(f"{BOLD}{CYAN}╚{'═' * W}╝{RESET}")
+
+    if platform and not platform.get("server_controlled"):
+        pname = platform.get("platform_name", "provider")
+        print(f"  {YELLOW}TLS config is managed by {pname} — findings below are not customer-configurable{RESET}")
 
     if tls.get("error"):
         print(f"\n  {RED}Error: {tls['error']}{RESET}")
@@ -2451,6 +2505,14 @@ def _print_trace_report(domain, report):
             _line(f"{sev_color}{c['severity']:<6}{RESET} {c['title']}")
             _line(f"       {DIM}{c['description']}{RESET}")
 
+    # Contextual insights
+    from .modules.intel import build_insights
+    insights = build_insights(report)
+    if insights:
+        _section("Insights", CYAN)
+        for insight in insights:
+            _line(f"{DIM}{insight}{RESET}")
+
     print()
 
 
@@ -2656,6 +2718,23 @@ def _run_waf_scan(targets, args):
         domain = _extract_domain(target)
         print(f"{CYAN}[*] WAF vulnerability scan: {domain}{RESET}", file=sys.stderr)
 
+        # Platform detection for context
+        from .modules.intel import detect_platform
+        from .modules import dns_resolver as _dns
+        _dns_info = _dns.resolve_domain(domain)
+        try:
+            import httpx
+            with httpx.Client(timeout=args.timeout, follow_redirects=True, verify=False) as _c:
+                _resp = _c.get(f"https://{domain}")
+            _server_hdr = _resp.headers.get("server", "")
+        except Exception:
+            _server_hdr = ""
+        _platform = detect_platform(server_header=_server_hdr, cnames=_dns_info.get("cnames", []))
+
+        if _platform.get("is_saas") and not is_json:
+            print(f"  {YELLOW}Platform: {_platform['platform_name']} (provider-hosted SaaS){RESET}", file=sys.stderr)
+            print(f"  {YELLOW}Network/path probes may not be applicable — server config is provider-managed{RESET}", file=sys.stderr)
+
         scanner = WAFVulnScanner(domain, timeout=args.timeout, proxy=args.proxy, user_agent=args.user_agent)
 
         if layers:
@@ -2666,6 +2745,7 @@ def _run_waf_scan(targets, args):
         else:
             report = scanner.scan_all(persist=persist)
 
+        report["platform"] = _platform
         all_reports.append({"target": domain, "report": report})
 
         if not is_json:
@@ -2683,6 +2763,10 @@ def _print_waf_scan_report(domain, report):
     print(f"\n{BOLD}{RED}{'=' * W}{RESET}")
     print(f"{BOLD}{RED}  WAF Vulnerability Scan: {domain}{RESET}")
     print(f"{BOLD}{RED}{'=' * W}{RESET}")
+
+    plat = report.get("platform", {})
+    if plat.get("is_saas"):
+        print(f"  {YELLOW}{plat['platform_name']} (SaaS) — network/path findings may not be customer-actionable{RESET}")
 
     findings = report.get("findings", [])
     if not findings:
@@ -3071,6 +3155,19 @@ def _run_vecino(targets, args):
             print(f"{BOLD}{CYAN}  Vecino + Cert Analysis: {domain} ({ip}){RESET}")
             print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
 
+        # 0. Quick platform detection
+        from .modules.intel import detect_platform
+        try:
+            import httpx
+            with httpx.Client(timeout=args.timeout, follow_redirects=True, verify=False) as _c:
+                _resp = _c.get(f"https://{domain}")
+            _server_hdr = _resp.headers.get("server", "")
+        except Exception:
+            _server_hdr = ""
+        from .modules import dns_resolver as _dns
+        _dns_info = _dns.resolve_domain(domain)
+        _platform = detect_platform(server_header=_server_hdr, cnames=_dns_info.get("cnames", []))
+
         # 1. SSL cert hosting classification
         if not is_json:
             sys.stderr.write(f"\r\033[K{DIM}  [~] SSL cert inspection (with/without SNI)...{RESET}")
@@ -3093,6 +3190,7 @@ def _run_vecino(targets, args):
             "target": target, "domain": domain, "ip": ip,
             "cert_classification": cert_class,
             "neighbours": neighbours,
+            "platform": _platform,
         }
         all_results.append(combined)
 
@@ -3124,6 +3222,9 @@ def _run_vecino(targets, args):
             # ── Neighbours ──
             _section("Reverse IP Neighbours", BLUE)
             n = neighbours
+            if _platform.get("is_saas"):
+                _line(f"{YELLOW}Note: {_platform['platform_name']} is provider-hosted SaaS — this IP is shared infrastructure.{RESET}")
+                _line(f"{YELLOW}Domains below are unrelated third-party sites on the same provider, not security-relevant.{RESET}")
             _line(f"Domains found: {BOLD}{n['domain_count']}{RESET}  "
                   f"(PTR: {n['sources'].get('ptr', 0)}, HackerTarget: {n['sources'].get('hackertarget', 0)}, "
                   f"RapidDNS: {n['sources'].get('rapiddns', 0)})")

@@ -226,8 +226,10 @@ def full_scan(target, timeout=10, scan_subs=False, check_cert=False,
     # 6. WAF evasion analysis
     if _should_run("evasion") and (check_evasion or only_modules):
         status("evasion", "WAF evasion analysis (UA, encoding, methods)")
+        _detected_wafs = [d["name"] for d in report.get("waf", []) if d["category"] in ("WAF", "CDN/WAF")]
         report["waf_evasion"] = waf_evasion.analyze_waf_detection(
-            domain, timeout=timeout, user_agent=user_agent, proxy=proxy
+            domain, timeout=timeout, user_agent=user_agent, proxy=proxy,
+            detected_waf=_detected_wafs, platform=platform,
         )
 
     # 7. Proxy effectiveness

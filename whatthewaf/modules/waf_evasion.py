@@ -35,8 +35,12 @@ ENCODING_TESTS = [
 ]
 
 
-def analyze_waf_detection(domain, timeout=10, user_agent=None, proxy=None):
+def analyze_waf_detection(domain, timeout=10, user_agent=None, proxy=None,
+                          detected_waf=None, platform=None):
     """Determine what the WAF detects about us.
+
+    detected_waf: list of detected WAF names (e.g. ["Cloudflare", "ModSecurity"])
+    platform: dict from detect_platform() — hosting type, SaaS status, etc.
 
     Returns dict with findings about UA sensitivity, rate limiting,
     encoding bypass, method restrictions, and evasion recommendations.
@@ -107,8 +111,17 @@ def analyze_waf_detection(domain, timeout=10, user_agent=None, proxy=None):
 
     allowed = [t["method"] for t in result["method_tests"] if t.get("allowed")]
     blocked = [t["method"] for t in result["method_tests"] if not t.get("allowed") and not t.get("error")]
+    # CDNs (Cloudflare, Akamai, Fastly) typically block TRACE before it reaches origin
+    _cdns_that_block_trace = {"Cloudflare", "Akamai", "Fastly", "AWS CloudFront", "StackPath"}
+    waf_names = set(detected_waf or [])
     if "TRACE" in allowed:
-        result["findings"].append("TRACE method allowed — potential XST (Cross-Site Tracing)")
+        if waf_names & _cdns_that_block_trace:
+            result["findings"].append(
+                f"TRACE method allowed — unusual, {', '.join(waf_names & _cdns_that_block_trace)} "
+                f"typically blocks TRACE. May indicate TRACE reaches origin directly."
+            )
+        else:
+            result["findings"].append("TRACE method allowed — potential XST (Cross-Site Tracing)")
     if blocked:
         result["findings"].append(f"Blocked HTTP methods: {', '.join(blocked)}")
 
@@ -181,6 +194,27 @@ def analyze_waf_detection(domain, timeout=10, user_agent=None, proxy=None):
 
     if not result["evasion_recommendations"]:
         result["evasion_recommendations"].append("WAF does not appear to be doing advanced detection")
+
+    # Add platform context
+    is_saas = (platform or {}).get("is_saas", False)
+    if is_saas:
+        pname = (platform or {}).get("platform_name", "SaaS provider")
+        result["findings"].append(
+            f"Note: {pname} is provider-hosted SaaS — evasion techniques targeting "
+            f"server config (encoding, methods) are not customer-actionable."
+        )
+
+    # Add WAF-specific notes
+    if detected_waf:
+        try:
+            from .intel import WAF_INTEL
+            for waf_name in detected_waf:
+                intel = WAF_INTEL.get(waf_name)
+                if intel and intel.get("weaknesses"):
+                    for w in intel["weaknesses"]:
+                        result["evasion_recommendations"].append(f"{waf_name}: {w}")
+        except ImportError:
+            pass
 
     return result
 
