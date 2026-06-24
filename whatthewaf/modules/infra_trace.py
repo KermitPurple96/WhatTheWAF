@@ -106,6 +106,27 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("cname", "cdn.dnsv1.com", 0.9),
     ]),
 
+    # ── Bot Protection / Challenge ───────────────────────────
+    ("DataDome", "waf", [
+        ("header", "x-datadome", 0.9),
+        ("cookie", "datadome", 0.9),
+        ("body", "datadome.co", 0.8),
+    ]),
+    ("PerimeterX", "waf", [
+        ("cookie", "_pxhd", 0.9),
+        ("cookie", "_pxvid", 0.8),
+        ("body", "perimeterx.net", 0.8),
+        ("body", "captcha.px-cdn.net", 0.9),
+    ]),
+    ("Kasada", "waf", [
+        ("header", "x-kpsdk-ct", 0.9),
+        ("header", "x-kpsdk-v", 0.9),
+    ]),
+    ("Shape Security", "waf", [
+        ("header", "x-distil-cs", 0.9),
+        ("cookie", "D_SID", 0.8),
+    ]),
+
     # ── Caching ──────────────────────────────────────────────
     ("Varnish", "cache", [
         ("header", "x-varnish", 0.9),
@@ -936,6 +957,11 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                     }
                     break  # only one
 
+    # ─── Detect challenge/captcha pages ───
+    challenge = _detect_challenge(body_lower, headers, cookie_str, error_headers_all)
+    if challenge:
+        report["_challenge_detected"] = challenge
+
     # ─── Build ordered chain ───
     nodes = list(detections.values())
     nodes = _deduplicate(nodes)
@@ -947,6 +973,48 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────
 #  Helpers
 # ──────────────────────────────────────────────────────────────
+
+def _detect_challenge(body_lower, headers, cookie_str, error_headers):
+    """Detect if the response is a challenge/captcha page that blocks content analysis."""
+    # Each check returns (challenge_name, evidence) or None
+    checks = [
+        # SiteGround captcha
+        ("sg-captcha" in (headers or {}) or "sg-captcha" in error_headers,
+         "SiteGround Captcha", "header:sg-captcha"),
+        ("sgcaptcha" in body_lower,
+         "SiteGround Captcha", "body:sgcaptcha redirect"),
+        # Cloudflare challenge (Under Attack Mode / managed challenge)
+        ("cf_chl_opt" in body_lower or "challenge-platform" in body_lower,
+         "Cloudflare Challenge", "body:cf challenge script"),
+        ("cf-mitigated" in (headers or {}),
+         "Cloudflare Challenge", "header:cf-mitigated"),
+        # Cloudflare Turnstile
+        ("challenges.cloudflare.com/turnstile" in body_lower or "cf-turnstile" in body_lower,
+         "Cloudflare Turnstile", "body:turnstile widget"),
+        # hCaptcha
+        ("hcaptcha.com" in body_lower or "h-captcha" in body_lower,
+         "hCaptcha", "body:hcaptcha widget"),
+        # Google reCAPTCHA
+        ("google.com/recaptcha" in body_lower or "g-recaptcha" in body_lower,
+         "Google reCAPTCHA", "body:recaptcha widget"),
+        # DataDome
+        ("datadome" in cookie_str or "x-datadome" in error_headers,
+         "DataDome", "cookie/header:datadome"),
+        # PerimeterX / HUMAN
+        ("_pxhd" in cookie_str or "captcha.px-cdn.net" in body_lower,
+         "PerimeterX", "cookie/body:perimeterx"),
+        # Kasada
+        ("x-kpsdk-ct" in error_headers,
+         "Kasada", "header:x-kpsdk-ct"),
+        # Akamai Bot Manager
+        ("_abck" in cookie_str and "ak_bmsc" in cookie_str,
+         "Akamai Bot Manager", "cookie:_abck+ak_bmsc"),
+    ]
+    for condition, name, evidence in checks:
+        if condition:
+            return {"name": name, "evidence": evidence}
+    return None
+
 
 def _hdr(headers, name):
     """Case-insensitive header lookup."""

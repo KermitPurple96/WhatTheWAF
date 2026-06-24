@@ -631,6 +631,21 @@ def build_insights(report):
             if waf_intel and waf_intel.get("notes"):
                 insights.append(f"{waf_intel['notes']}")
 
+    # 8. Challenge/captcha blocking detection
+    challenge = report.get("_challenge_detected")
+    if challenge:
+        ch_name = challenge["name"]
+        has_cms = any(d.get("layer") == "cms"
+                      for d in report.get("infra_chain", []))
+        insights.append(
+            f"{ch_name} detected — bot protection is blocking automated analysis"
+        )
+        if not has_cms:
+            insights.append(
+                "CMS/framework could not be identified (challenge page blocks content). "
+                "Use --solve-challenge to bypass with headless browser."
+            )
+
     # Deduplicate while preserving order
     seen = set()
     unique = []
