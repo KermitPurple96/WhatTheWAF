@@ -467,12 +467,20 @@ def _fetch_probe(url, path, timeout=8, user_agent=None, proxy=None):
         return {"url": probe_url, "error": str(e)}
 
 
-def _detect_error_server(status, headers, body):
+def _detect_error_server(status, headers, body, probe_path=""):
     """Identify the server software from error page signatures."""
     server = headers.get("server", headers.get("Server", ""))
     detections = []
 
     body_lower = body.lower() if body else ""
+
+    # Strip reflected probe path from body to prevent false positives
+    # (e.g. captcha redirects that embed the original URL in the response)
+    if probe_path and body_lower:
+        # Remove URL-encoded and raw variants of the probe path
+        from urllib.parse import quote
+        for variant in (probe_path.lower(), quote(probe_path, safe="").lower()):
+            body_lower = body_lower.replace(variant, "")
 
     # Apache error page signatures
     if re.search(r"<address>apache/[\d.]+", body_lower):
@@ -673,7 +681,7 @@ def probe_error_pages(url, timeout=8, user_agent=None, proxy=None, max_workers=8
         all_waf_names.update(waf_names)
 
         # Error page server detection
-        server_leaks = _detect_error_server(status, resp["headers"], resp["body"])
+        server_leaks = _detect_error_server(status, resp["headers"], resp["body"], path)
         for name, ver, source in server_leaks:
             key = (name, ver)
             if key not in seen_leaks:

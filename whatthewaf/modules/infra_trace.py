@@ -211,8 +211,10 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
     # ── Hosting Platforms ────────────────────────────────────
     ("SiteGround", "hosting", [
         ("header", "x-siteground", 0.9),
+        ("header", "sg-captcha", 0.9),
         ("cookie", "sg_cookies", 0.8),
         ("cert_subject", "siteground", 0.7),
+        ("body", "sgcaptcha", 0.8),
         ("body", "siteground", 0.5),
     ]),
     ("WP Engine", "hosting", [
