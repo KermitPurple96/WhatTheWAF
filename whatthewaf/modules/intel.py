@@ -642,8 +642,7 @@ def build_insights(report):
         )
         if not has_cms:
             insights.append(
-                "CMS/framework could not be identified (challenge page blocks content). "
-                "Use --solve-challenge to bypass with headless browser."
+                "CMS/framework could not be identified (challenge page blocks content)"
             )
 
     # Deduplicate while preserving order

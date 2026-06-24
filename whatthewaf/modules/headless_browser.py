@@ -244,6 +244,7 @@ def solve_challenge(url, timeout=30, proxy=None, wait_for=None, extract_cookies=
                 "ray-id", "checking your browser", "please wait",
                 "ddos-protection", "security check", "just a moment",
                 "datadome", "perimeterx", "px-captcha",
+                "sgcaptcha", "sg-captcha", "hcaptcha", "g-recaptcha",
             ]
 
             content_lower = content.lower()
