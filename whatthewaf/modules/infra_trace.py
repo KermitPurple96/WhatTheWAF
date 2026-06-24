@@ -89,6 +89,22 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("server", "ecs", 0.7),
         ("server", "ecacc", 0.7),
     ]),
+    ("Bunny CDN", "cdn", [
+        ("header", "cdn-pullzone", 0.9),
+        ("header", "cdn-uid", 0.9),
+        ("header", "cdn-requestcountrycode", 0.8),
+        ("server", "bunnycdn", 0.9),
+    ]),
+    ("GCore CDN", "cdn", [
+        ("header", "x-gcore-request-id", 0.9),
+        ("cname", "gcdn.co", 0.9),
+        ("cname", "gcorelabs", 0.9),
+    ]),
+    ("Tencent Cloud CDN", "cdn", [
+        ("header", "x-nws-log-uuid", 0.8),
+        ("header", "x-cache-lookup", 0.7),
+        ("cname", "cdn.dnsv1.com", 0.9),
+    ]),
 
     # ── Caching ──────────────────────────────────────────────
     ("Varnish", "cache", [
@@ -120,6 +136,14 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("header", "x-litespeed-cache", 0.9),
         ("header_value", "x-lsadc-cache", None, 0.8),
     ]),
+    ("WP Rocket", "cache", [
+        ("body", "wp rocket", 0.8),
+        ("body", "wprocketoptimized", 0.9),
+    ]),
+    ("WP Fastest Cache", "cache", [
+        ("body", "wp fastest cache", 0.9),
+        ("header", "x-wpfc-served", 0.9),
+    ]),
 
     # ── Load Balancers ───────────────────────────────────────
     ("HAProxy", "loadbalancer", [
@@ -146,6 +170,16 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("server", "traefik", 0.9),
         ("header", "x-traefik", 0.8),
     ]),
+    ("Google Cloud LB", "loadbalancer", [
+        ("header", "x-cloud-trace-context", 0.6),
+        ("via_contains", "google", 0.7),
+        ("server", "google frontend", 0.8),
+    ]),
+    ("Kong", "loadbalancer", [
+        ("server", "kong", 0.9),
+        ("header", "x-kong-upstream-latency", 0.9),
+        ("header", "x-kong-proxy-latency", 0.9),
+    ]),
 
     # ── Reverse Proxies ──────────────────────────────────────
     ("nginx", "proxy", [
@@ -165,6 +199,13 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
     ("OpenResty", "proxy", [
         ("server", "openresty", 0.8),
         ("error_page", "openresty", 0.8),
+    ]),
+    ("Tengine", "proxy", [
+        ("server", "tengine", 0.9),
+    ]),
+    ("Apache Traffic Server", "proxy", [
+        ("server", "ats", 0.8),
+        ("via_contains", "apachetrafficserver", 0.9),
     ]),
 
     # ── Hosting Platforms ────────────────────────────────────
@@ -232,6 +273,46 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("cookie", "_shopify_", 0.9),
         ("cname", "shopify", 0.9),
     ]),
+    ("Render", "hosting", [
+        ("header", "x-render-origin-server", 0.9),
+        ("cname", "onrender.com", 0.9),
+    ]),
+    ("Fly.io", "hosting", [
+        ("header", "fly-request-id", 0.9),
+        ("server", "fly", 0.8),
+        ("cname", "fly.dev", 0.9),
+    ]),
+    ("Railway", "hosting", [
+        ("cname", "railway.app", 0.9),
+        ("header", "x-railway-", 0.8),
+    ]),
+    ("Platform.sh", "hosting", [
+        ("header", "x-platform-server", 0.9),
+        ("header", "x-platform-cluster", 0.9),
+        ("cname", "platform.sh", 0.9),
+    ]),
+    ("Acquia", "hosting", [
+        ("header", "x-ah-environment", 0.9),
+        ("cname", "acquia", 0.9),
+    ]),
+    ("GCP App Engine", "hosting", [
+        ("header", "x-appengine-resource-usage", 0.9),
+        ("header", "x-google-backends", 0.8),
+        ("cname", "appspot.com", 0.9),
+    ]),
+    ("Azure App Service", "hosting", [
+        ("cookie", "ARRAffinity", 0.9),
+        ("header", "x-azure-ref", 0.7),
+        ("cname", "azurewebsites.net", 0.9),
+    ]),
+    ("Cloudways", "hosting", [
+        ("header", "x-cw-cdn", 0.9),
+        ("cname", "cloudwaysapps.com", 0.9),
+    ]),
+    ("DigitalOcean App", "hosting", [
+        ("cname", "ondigitalocean.app", 0.9),
+        ("header", "x-do-app-origin", 0.9),
+    ]),
 
     # ── Web Servers (origin) ─────────────────────────────────
     # NOTE: "apache" error_page pattern must NOT match "apache tomcat"
@@ -250,6 +331,9 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
     ("LiteSpeed", "server", [
         ("server", "litespeed", 0.9),
         ("error_page", "litespeed", 0.8),
+    ]),
+    ("Kestrel", "server", [
+        ("server", "kestrel", 0.9),
     ]),
 
     # ── App Servers / Runtimes ───────────────────────────────
@@ -300,6 +384,16 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("header_value", "x-powered-by", "asp.net", 0.9),
         ("cookie", "ASP.NET_SessionId", 0.9),
         ("error_page", "asp.net", 0.8),
+    ]),
+    ("Uvicorn", "runtime", [
+        ("server", "uvicorn", 0.9),
+    ]),
+    ("Deno", "runtime", [
+        ("server", "deno", 0.9),
+        ("header", "x-deno-ray", 0.9),
+    ]),
+    ("Bun", "runtime", [
+        ("server", "bun", 0.8),
     ]),
     ("Ruby", "runtime", [
         ("cookie", "_rails_session", 0.8),
@@ -363,6 +457,40 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("cookie", "CFTOKEN", 0.9),
         ("error_page", "coldfusion", 0.9),
     ]),
+    ("FastAPI", "framework", [
+        ("error_page", "fastapi", 0.9),
+        ("body", "swagger-ui", 0.4),  # low conf — many APIs use Swagger
+    ]),
+    ("Symfony", "framework", [
+        ("header_value", "x-powered-by", "symfony", 0.9),
+        ("error_page", "symfony", 0.9),
+        ("cookie", "symfony", 0.8),
+    ]),
+    ("SvelteKit", "framework", [
+        ("body", "__sveltekit", 0.9),
+        ("body", "_app/immutable", 0.7),
+    ]),
+    ("Remix", "framework", [
+        ("body", "__remixContext", 0.9),
+        ("body", "__remix", 0.8),
+    ]),
+    ("Gatsby", "framework", [
+        ("body", "gatsby-", 0.7),
+        ("header", "x-gatsby-cache", 0.9),
+        ("body", "gatsby-image", 0.8),
+    ]),
+    ("Astro", "framework", [
+        ("body", "astro-island", 0.9),
+        ("body_meta", "astro", 0.8),
+    ]),
+    ("AdonisJS", "framework", [
+        ("cookie", "adonis-session", 0.9),
+        ("header_value", "x-powered-by", "adonis", 0.9),
+    ]),
+    ("CodeIgniter", "framework", [
+        ("cookie", "ci_session", 0.8),
+        ("error_page", "codeigniter", 0.9),
+    ]),
 
     # ── CMS ──────────────────────────────────────────────────
     ("WordPress", "cms", [
@@ -419,6 +547,83 @@ _FINGERPRINTS: List[Tuple[str, str, List[Tuple[str, str, float]]]] = [
         ("body", "prestashop", 0.8),
         ("cookie", "PrestaShop-", 0.9),
     ]),
+    ("TYPO3", "cms", [
+        ("cookie", "fe_typo_user", 0.9),
+        ("body", "typo3conf/", 0.9),
+        ("body_meta", "typo3", 0.9),
+        ("body", "typo3temp/", 0.8),
+    ]),
+    ("Craft CMS", "cms", [
+        ("cookie", "CraftSessionId", 0.9),
+        ("header", "x-craft-solo", 0.9),
+        ("body_meta", "craft cms", 0.9),
+    ]),
+    ("HubSpot CMS", "cms", [
+        ("body", "hs-scripts.com", 0.7),
+        ("cname", "hubspot", 0.8),
+        ("header", "x-hs-hub-id", 0.9),
+    ]),
+    ("Umbraco", "cms", [
+        ("body", "umbraco", 0.7),
+        ("cookie", "UMB_SESSION", 0.9),
+        ("body_meta", "umbraco", 0.9),
+    ]),
+    ("MediaWiki", "cms", [
+        ("body_meta", "mediawiki", 0.9),
+        ("body", "mw-page-container", 0.8),
+        ("body", "mediawiki", 0.7),
+    ]),
+    ("Moodle", "cms", [
+        ("cookie", "MoodleSession", 0.9),
+        ("body", "moodlelib", 0.8),
+        ("body_meta", "moodle", 0.9),
+    ]),
+    ("Discourse", "cms", [
+        ("body_meta", "discourse", 0.9),
+        ("body", "discourse-", 0.7),
+        ("header", "x-discourse-route", 0.9),
+    ]),
+    ("XenForo", "cms", [
+        ("body", "xenforo", 0.8),
+        ("cookie", "xf_session", 0.9),
+        ("cookie", "xf_user", 0.9),
+    ]),
+    ("Concrete CMS", "cms", [
+        ("body", "concretecms", 0.9),
+        ("body", "concrete5", 0.8),
+        ("cookie", "CONCRETE5", 0.9),
+    ]),
+    ("Blogger", "cms", [
+        ("cname", "blogger", 0.9),
+        ("body", "blogspot.com", 0.8),
+        ("body_meta", "blogger", 0.9),
+    ]),
+    ("DNN (DotNetNuke)", "cms", [
+        ("cookie", "dnn_IsMobile", 0.9),
+        ("body", "dnnVariable", 0.9),
+        ("body", "DotNetNuke", 0.8),
+    ]),
+    ("Adobe Experience Manager", "cms", [
+        ("body", "/etc.clientlibs/", 0.8),
+        ("body", "/content/dam/", 0.7),
+        ("header", "x-aem-", 0.9),
+    ]),
+    ("Sitecore", "cms", [
+        ("cookie", "SC_ANALYTICS", 0.9),
+        ("cookie", "sitecore_", 0.8),
+        ("body", "sitecore", 0.6),
+    ]),
+    ("Weebly", "cms", [
+        ("body", "weebly.com", 0.8),
+        ("cname", "weebly", 0.9),
+    ]),
+    ("ExpressionEngine", "cms", [
+        ("cookie", "exp_tracker", 0.9),
+        ("cookie", "exp_sessionid", 0.9),
+    ]),
+    ("DynamicWeb", "cms", [
+        ("header_value", "x-powered-by", "dynamicweb", 0.9),
+    ]),
 ]
 
 # Layer ordering (outermost → innermost)
@@ -432,7 +637,24 @@ LAYER_ORDER = [
     "runtime",
     "framework",
     "cms",
+    "app-waf",
 ]
+
+# WAFs that are CMS plugins / application-level (run inside PHP/app, not at network edge)
+APP_LEVEL_WAFS = {
+    "Wordfence", "Shield Security", "Malcare", "SecuPress",
+    "RSFirewall", "Powerful Firewall", "aeSecure", "pkSecurityModule",
+    "NinjaFirewall", "BulletProof Security", "All In One WP Security",
+    "iThemes Security", "Cerber Security",
+}
+
+# Technologies in waf_signatures that are misclassified as WAFs — remap to correct trace layer
+_WAF_LAYER_OVERRIDES = {
+    "CodeIgniter": "framework",
+    "ExpressionEngine": "cms",
+    "DynamicWeb": "cms",
+    "ASP.NET Generic": "runtime",
+}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -632,7 +854,16 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
         if cat == "Web Server":
             continue
         if name not in detections:
-            layer = "cdn" if cat == "CDN" else "waf" if cat == "WAF" else "cdn/waf"
+            if name in _WAF_LAYER_OVERRIDES:
+                layer = _WAF_LAYER_OVERRIDES[name]
+            elif cat == "CDN":
+                layer = "cdn"
+            elif cat == "WAF" and name in APP_LEVEL_WAFS:
+                layer = "app-waf"
+            elif cat == "WAF":
+                layer = "waf"
+            else:
+                layer = "cdn/waf"
             detections[name] = {
                 "name": name,
                 "layer": layer,
@@ -653,9 +884,10 @@ def trace_infra(report: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Determine layer based on server type
         _server_lower = server_hdr.lower()
         _proxy_keywords = {"nginx", "openresty", "envoy", "haproxy", "traefik", "varnish",
-                           "caddy", "tengine", "kong", "apisix"}
+                           "caddy", "tengine", "kong", "apisix", "ats", "squid"}
         _server_keywords = {"apache", "iis", "litespeed", "tomcat", "jetty", "gunicorn",
-                            "uvicorn", "puma", "kestrel", "wildfly", "weblogic"}
+                            "uvicorn", "puma", "kestrel", "wildfly", "weblogic",
+                            "deno", "bun", "uwsgi", "waitress", "daphne", "hypercorn"}
         if any(k in _server_lower for k in _proxy_keywords):
             _fallback_layer = "proxy"
         elif any(k in _server_lower for k in _server_keywords):

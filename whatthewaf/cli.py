@@ -2394,6 +2394,7 @@ def _print_trace_report(domain, report):
         "proxy": YELLOW, "hosting": CYAN,
         "server": GREEN, "runtime": GREEN,
         "framework": MAGENTA, "cms": MAGENTA,
+        "app-waf": RED,
     }
     layer_labels = {
         "cdn": "CDN", "waf": "WAF", "cdn/waf": "CDN/WAF",
@@ -2401,6 +2402,7 @@ def _print_trace_report(domain, report):
         "proxy": "PROXY", "hosting": "HOSTING",
         "server": "SERVER", "runtime": "RUNTIME",
         "framework": "FRAMEWORK", "cms": "CMS",
+        "app-waf": "WAF",
     }
 
     # Traffic path chain
