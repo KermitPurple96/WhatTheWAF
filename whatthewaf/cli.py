@@ -205,7 +205,7 @@ def main():
     parser.add_argument("--bypass", action="store_true", help="WAF bypass testing with resolved IPs")
     parser.add_argument("--only", metavar="MODULES", help=argparse.SUPPRESS)
     parser.add_argument("--ip", metavar="IP",
-                        help="IP(s) to test for WAF bypass — single IP, comma-separated, CIDR range (1.2.3.0/24), 'auto', or 'history'")
+                        help="IP(s) to test — single IP, comma-separated, CIDR range (1.2.3.0/24), or ('auto'/'history', WAF bypass mode only)")
     parser.add_argument("--path", metavar="PATH", default="/",
                         help="Path to test in --ip mode (default: /)")
     parser.add_argument("--subs", action="store_true", help="Enable subdomain leakage scan")
@@ -332,7 +332,8 @@ def main():
     parser.add_argument("--headers", action="store_true",
                         help="Audit HTTP security headers (HSTS, CSP, X-Frame-Options, cookies, info leaks)")
     parser.add_argument("--vecino", action="store_true",
-                        help="Reverse IP neighbours + hosting type classification (shared/VPS/SaaS)")
+                        help="Reverse IP neighbours + hosting type classification (shared/VPS/SaaS). "
+                             "Accepts IPs directly as targets, or via --ip (single, comma-separated, or CIDR)")
     parser.add_argument("--recon", action="store_true",
                         help="Run all OSINT sources, correlate results, and classify IPs")
     parser.add_argument("-v", "--version", action="version", version=f"WhatTheWAF {__version__}")
@@ -431,8 +432,10 @@ def main():
         return
 
     if args.vecino:
+        if args.ip and args.ip not in ("auto", "history"):
+            targets = list(targets) + _expand_ip_targets(args.ip)
         if not targets:
-            parser.error("--vecino requires at least one target.")
+            parser.error("--vecino requires at least one target (or --ip).")
         _run_vecino(targets, args)
         return
 
