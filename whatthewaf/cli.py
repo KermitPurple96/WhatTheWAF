@@ -3261,7 +3261,7 @@ def _run_vecino(targets, args):
                     verdict_source = f"SSL cert analysis (vecino says {vecino_type} but cert overrides)"
                 else:
                     verdict_source = "SSL cert analysis"
-            elif cert_type in ("SHARED_HOSTING", "SAAS", "MANAGED_HOSTING", "CDN"):
+            elif cert_conf == "medium" and cert_type in ("SHARED_HOSTING", "SAAS", "MANAGED_HOSTING", "CDN"):
                 verdict = cert_type
                 verdict_source = "SSL cert analysis"
             elif vecino_type == "SHARED" and n.get("domain_count", 0) > 5:
@@ -3273,6 +3273,9 @@ def _run_vecino(targets, args):
             elif vecino_type != "UNKNOWN":
                 verdict = vecino_type
                 verdict_source = "reverse IP neighbours"
+            elif cert_type != "UNKNOWN":
+                verdict = cert_type
+                verdict_source = "SSL cert analysis (low confidence)"
             else:
                 verdict = "UNKNOWN"
                 verdict_source = "insufficient data"
