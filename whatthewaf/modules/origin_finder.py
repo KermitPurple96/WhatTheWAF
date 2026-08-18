@@ -356,9 +356,14 @@ def classify_hosting_by_cert(ip, hostname, timeout=5):
             result["confidence"] = "high"
 
     elif cert_with_sni and not cert_no_sni:
-        result["signals"].append("No default cert (SNI required) → likely shared/CDN")
+        # Weak signal only: SNI-only vhosts on a dedicated/VPS server also
+        # fail a no-SNI handshake, so this alone doesn't prove multi-tenancy.
+        result["signals"].append(
+            "No default cert without SNI (connection failed/rejected) — "
+            "inconclusive on its own, also common on SNI-only dedicated/VPS servers"
+        )
         result["hosting_type"] = "SHARED_HOSTING"
-        result["confidence"] = "medium"
+        result["confidence"] = "low"
 
     # --- Check SAN count on the cert that matches the hostname ---
     active_cert = cert_with_sni or cert_no_sni
@@ -374,7 +379,7 @@ def classify_hosting_by_cert(ip, hostname, timeout=5):
                 result["signals"].append(
                     f"Cert has {len(unrelated)} unrelated domain(s) in SANs → shared hosting"
                 )
-                if result["hosting_type"] == "UNKNOWN":
+                if result["hosting_type"] == "UNKNOWN" or result["confidence"] == "low":
                     result["hosting_type"] = "SHARED_HOSTING"
                     result["confidence"] = "medium"
 
@@ -384,6 +389,13 @@ def classify_hosting_by_cert(ip, hostname, timeout=5):
             result["confidence"] = "high"
         elif san_count <= 2:
             result["signals"].append(f"Cert covers {san_count} SAN(s) → dedicated/VPS")
+            if result["confidence"] != "high":
+                if result["hosting_type"] == "SHARED_HOSTING":
+                    result["signals"].append(
+                        "Low SAN count contradicts the weaker shared-hosting signal above → overriding to dedicated/VPS"
+                    )
+                result["hosting_type"] = "VPS/DEDICATED"
+                result["confidence"] = "medium"
 
     return result
 

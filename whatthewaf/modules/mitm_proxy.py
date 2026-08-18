@@ -396,6 +396,34 @@ class MITMProxy:
                 pass
 
     # ------------------------------------------------------------------
+    # TCP relay (passthrough without TLS interception)
+    # ------------------------------------------------------------------
+
+    def _tcp_relay(self, client_sock: socket.socket, remote_sock: socket.socket) -> None:
+        """Bidirectional TCP relay — no TLS interception, no header modification."""
+        import select as _sel
+        try:
+            socks = [client_sock, remote_sock]
+            while True:
+                readable, _, errored = _sel.select(socks, [], socks, 30)
+                if errored:
+                    break
+                for s in readable:
+                    data = s.recv(65536)
+                    if not data:
+                        return
+                    dst = remote_sock if s is client_sock else client_sock
+                    dst.sendall(data)
+        except Exception:
+            pass
+        finally:
+            for s in (client_sock, remote_sock):
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
     # CONNECT (HTTPS MITM)
     # ------------------------------------------------------------------
 
@@ -416,6 +444,21 @@ class MITMProxy:
         port = int(port_s)
 
         self._log(f"CONNECT {host}:{port}")
+
+        # Passthrough: don't MITM Cloudflare challenge domains — the browser
+        # must talk TLS directly to solve the Turnstile/Managed Challenge.
+        _CF_PASSTHROUGH = (".challenges.cloudflare.com", "challenges.cloudflare.com")
+        if host.endswith(_CF_PASSTHROUGH) or host in _CF_PASSTHROUGH:
+            self._log(f"PASSTHROUGH {host}:{port} (Cloudflare challenge)")
+            client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            try:
+                remote_sock = socket.create_connection((host, port), timeout=10)
+            except Exception as e:
+                self._log(f"Passthrough connect failed {host}:{port}: {e}")
+                client_sock.close()
+                return
+            self._tcp_relay(client_sock, remote_sock)
+            return
 
         # Step 1: Tell the client the tunnel is ready
         client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
