@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from whatthewaf.modules.infra_trace import (  # noqa: E402
     _tr_stats, _parse_traceroute, _parse_tracert, _parse_mpls,
     _path_signature, _build_multipath_summary, build_trace_graph,
+    _extract_ip, _is_private,
 )
 
 
@@ -142,6 +143,38 @@ def test_multipath_summary():
     s4 = _build_multipath_summary(noisy, {}, {})
     assert s4["branches"] == {} and s4["divergence_hop"] is None
     assert s4["distinct_paths"] == 1
+
+
+# ── IPv6 support ─────────────────────────────────────────────────────────────
+def test_extract_ip():
+    assert _extract_ip("192.168.1.1  1.2 ms  1.1 ms") == "192.168.1.1"
+    assert _extract_ip(" 2001:db8::1  1.2 ms  0.9 ms") == "2001:db8::1"
+    assert _extract_ip("2606:4700:4700::1111 10 ms") == "2606:4700:4700::1111"
+    # Only RTTs + an MPLS block, no address → None.
+    assert _extract_ip("10.1 ms <MPLS:L=24012,E=0,S=1,T=1> 9.8 ms") is None
+
+
+def test_is_private_v6():
+    assert _is_private("fe80::1") is True        # link-local
+    assert _is_private("::1") is True            # loopback
+    assert _is_private("fd00::1") is True         # unique local
+    assert _is_private("2606:4700:4700::1111") is False  # global (Cloudflare)
+    assert _is_private("10.0.0.1") is True        # IPv4 still works
+    assert _is_private("8.8.8.8") is False
+
+
+V6_OUT = """traceroute to example.com (2606:2800:220::1), 30 hops max, 80 byte packets
+ 1  2001:db8::1  1.0 ms  1.1 ms  0.9 ms
+ 2  * * *
+ 3  2606:4700::1  10.0 ms  10.5 ms  9.5 ms
+"""
+
+
+def test_parse_traceroute_v6():
+    hops = _parse_traceroute(V6_OUT)
+    assert [h["ip"] for h in hops] == ["2001:db8::1", "*", "2606:4700::1"]
+    assert hops[0]["recv"] == 3 and hops[0]["loss_pct"] == 0.0
+    assert hops[2]["ip"] == "2606:4700::1"
 
 
 TR_FIXTURE = {

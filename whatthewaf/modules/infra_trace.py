@@ -19,6 +19,7 @@ Signals used per layer:
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import sys
@@ -1108,6 +1109,18 @@ def _tr_stats(rtts: List[float], timeouts: int) -> Dict[str, Any]:
     return out
 
 
+def _extract_ip(text: str) -> Optional[str]:
+    """First IPv4 or IPv6 address in a numeric (-n) traceroute line, else None."""
+    for tok in re.split(r"[\s()]+", text.strip()):
+        tok = tok.strip(",")
+        try:
+            ipaddress.ip_address(tok)
+            return tok
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_mpls(text: str) -> List[Dict]:
     """Parse GNU traceroute -e MPLS stacks: <MPLS:L=24012,E=0,S=1,T=1>."""
     labels = []
@@ -1132,16 +1145,15 @@ def _parse_traceroute(output: str) -> List[Dict]:
         hop_num = int(m.group(1))
         rest = m.group(2)
 
-        # Extract first IP (hop may show multiple on ECMP — take first here)
-        ip_match = re.search(r'\(?((?:\d{1,3}\.){3}\d{1,3})\)?', rest)
-        if not ip_match:
+        # Extract first IP (v4 or v6; hop may show multiple on ECMP — take first)
+        ip = _extract_ip(rest)
+        if ip is None:
             # Whole hop timed out (e.g. "* * *")
             hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
                          "sent": rest.count("*") or None, "recv": 0,
                          "loss_pct": 100.0})
             continue
 
-        ip = ip_match.group(1)
         rtts = [float(x) for x in re.findall(r'([\d.]+)\s*ms', rest)]
         timeouts = rest.count("*")
         hop: Dict[str, Any] = {"hop": hop_num, "ip": ip}
@@ -1166,13 +1178,13 @@ def _parse_tracert(output: str) -> List[Dict]:
         rtts = [0.5 if v.startswith("<") else float(v)
                 for v in re.findall(r'(<?\d+)\s*ms', rest)]
         timeouts = len(re.findall(r'\*', rest))
-        ip_match = re.search(r'((?:\d{1,3}\.){3}\d{1,3})', rest)
-        if not ip_match:
+        ip = _extract_ip(rest)
+        if ip is None:
             hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
                          "sent": timeouts or None, "recv": 0,
                          "loss_pct": 100.0})
             continue
-        hop: Dict[str, Any] = {"hop": hop_num, "ip": ip_match.group(1)}
+        hop: Dict[str, Any] = {"hop": hop_num, "ip": ip}
         hop.update(_tr_stats(rtts, timeouts))
         hops.append(hop)
     return hops
@@ -1208,7 +1220,8 @@ def _path_signature(hops: List[Dict]) -> Tuple:
 
 
 def _enumerate_multipath(domain: str, max_hops: int, timeout: int,
-                         is_root: bool, on_status, flows: int = 8) -> Dict[str, Any]:
+                         is_root: bool, on_status, flows: int = 8,
+                         family: str = "4") -> Dict[str, Any]:
     """Enumerate ECMP paths by tracing several distinct L4 flows in parallel.
 
     GNU traceroute is Paris-consistent within a run (fixed flow-id); varying the
@@ -1225,7 +1238,8 @@ def _enumerate_multipath(domain: str, max_hops: int, timeout: int,
                 "note": "multipath needs GNU traceroute (Linux); "
                         "tracert/Windows cannot vary the flow-id"}
 
-    mpls_flag = ["-e"] if sys.platform.startswith("linux") else []
+    fam_flag = ["-6"] if str(family) == "6" else ["-4"]
+    mpls_flag = ["-e"] if (sys.platform.startswith("linux") and str(family) != "6") else []
     transport = "tcp:443" if is_root else "udp"
     # ECMP branching we can observe is in the ISP/transit portion; cap the flow
     # depth and shorten the wait so 8 (serialised, root/TCP) flows stay tolerable.
@@ -1239,14 +1253,14 @@ def _enumerate_multipath(domain: str, max_hops: int, timeout: int,
             # Fix dst=443, vary source port. GNU traceroute needs --sport=NUM
             # (not space-separated); --sport implies -N 1 (serialised).
             sport = 33000 + k
-            cmd = [tr_bin, "-T", "-p", "443", f"--sport={sport}",
+            cmd = [tr_bin, *fam_flag, "-T", "-p", "443", f"--sport={sport}",
                    *mpls_flag, "-n", "-q", "1", "-m", mp_hops,
                    "-w", mp_wait, domain]
             tasks.append((k, sport, cmd))
         else:
             # -U = fixed UDP dst port (Paris); vary it across flows.
             dport = 33434 + k
-            cmd = [tr_bin, "-U", "-p", str(dport), *mpls_flag,
+            cmd = [tr_bin, *fam_flag, "-U", "-p", str(dport), *mpls_flag,
                    "-n", "-q", "1", "-N", "16", "-m", mp_hops,
                    "-w", mp_wait, domain]
             tasks.append((k, dport, cmd))
@@ -1347,8 +1361,10 @@ def _is_cdn_ip_safe(ip: str):
 
 def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
                    on_status=None, multipath: bool = True,
-                   flows: int = 8) -> Dict[str, Any]:
+                   flows: int = 8, family: str = "4") -> Dict[str, Any]:
     """Run traceroute at multiple layers and classify each hop by ASN.
+
+    family: "4" (IPv4, default) or "6" (IPv6). NAT detection is IPv4-only.
 
     Runs UDP traceroute (no root) and TCP traceroute on port 443 (needs root).
     Merges results to get the most complete path.
@@ -1375,37 +1391,41 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     tcptr_bin = shutil.which("tcptraceroute")
     # MPLS/ICMP extensions (-e) are a GNU/Linux traceroute feature; BSD/macOS
     # traceroute rejects the flag and would fail the whole probe, so gate it.
-    mpls_flag = ["-e"] if sys.platform.startswith("linux") else []
+    fam = "6" if str(family) == "6" else "4"
+    fam_flag = ["-6"] if fam == "6" else ["-4"]
+    # MPLS/ICMP extensions (-e) are a GNU/Linux + IPv4 feature; gate accordingly.
+    mpls_flag = ["-e"] if (sys.platform.startswith("linux") and fam == "4") else []
 
     if os.name == "nt" and not tr_bin:
         # Windows: built-in tracert (ICMP, 3 probes/hop, no admin). -w is in ms.
         tracert_bin = shutil.which("tracert") or "tracert"
         cmds.append((
-            [tracert_bin, "-d", "-h", str(max_hops),
+            [tracert_bin, "-d", ("-6" if fam == "6" else "-4"), "-h", str(max_hops),
              "-w", str(timeout * 1000), domain],
             "icmp(tracert)", False, _parse_tracert
         ))
     elif tr_bin:
         # ICMP (works without root on most systems, best firewall penetration)
         cmds.append((
-            [tr_bin, "-I", *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
+            [tr_bin, *fam_flag, "-I", *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
              "-w", str(timeout), domain],
             "icmp", False, _parse_traceroute
         ))
         # UDP (default traceroute, different filtering behavior than ICMP)
         cmds.append((
-            [tr_bin, *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
+            [tr_bin, *fam_flag, *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
              "-w", str(timeout), domain],
             "udp", False, _parse_traceroute
         ))
         # TCP on port 443 (needs root or setuid — best for web targets)
         cmds.append((
-            [tr_bin, "-T", "-p", "443", *mpls_flag, "-n", "-q", "3",
+            [tr_bin, *fam_flag, "-T", "-p", "443", *mpls_flag, "-n", "-q", "3",
              "-m", str(max_hops), "-w", str(timeout), domain],
             "tcp:443", True, _parse_traceroute
         ))
 
-    if tcptr_bin:
+    # tcptraceroute is IPv4-only; skip it for IPv6 traces.
+    if tcptr_bin and fam == "4":
         cmds.append((
             [tcptr_bin, "-n", "-q", "3",
              "-m", str(max_hops), "-w", str(timeout), domain, "443"],
@@ -1461,7 +1481,7 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     if multipath:
         is_root = (getattr(os, "geteuid", lambda: 1)() == 0)
         mp = _enumerate_multipath(domain, max_hops, timeout, is_root,
-                                  _status, flows=flows)
+                                  _status, flows=flows, family=family)
 
     # Union of every real IP seen across the primary path and all ECMP flows.
     all_real: List[str] = []
@@ -1528,8 +1548,8 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         result["multipath"] = summary
         result["paths"] = mp.get("paths", [])
 
-    # ── NAT detection (Dublin-style IP-ID probing; Linux + root only) ──
-    if multipath:
+    # ── NAT detection (Dublin-style IP-ID probing; Linux + root, IPv4 only) ──
+    if multipath and fam == "4":
         try:
             from . import nat_detect
             result["nat"] = nat_detect.detect_nat(
@@ -1537,6 +1557,9 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
                 on_status=_status)
         except Exception:
             pass
+    elif multipath and fam == "6":
+        result["nat"] = {"supported": False,
+                         "note": "NAT detection is IPv4-only (no IP-ID in IPv6)"}
 
     # If many hops are filtered, fetch BGP AS path to show intermediate networks
     total = len(hops)
@@ -1883,7 +1906,13 @@ def _classify_hop_role(hop):
 
 
 def _is_private(ip: str) -> bool:
-    """Check if an IP is in a private/reserved range."""
+    """Check if an IP is in a private/reserved range (IPv4 or IPv6)."""
+    if ":" in ip:
+        try:
+            a = ipaddress.ip_address(ip)
+            return a.is_private or a.is_link_local or a.is_loopback
+        except ValueError:
+            return False
     parts = ip.split(".")
     if len(parts) != 4:
         return False

@@ -42,6 +42,15 @@ CDN_KEYWORDS = [
 IP_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
 
+def _valid_ip(s):
+    """True if s is a valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(s.strip())
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 def lookup_asn(ip):
     """Query Team Cymru WHOIS for ASN info on a single IP.
 
@@ -110,7 +119,7 @@ def lookup_asn_bulk(ips):
             parts = [p.strip() for p in line.split("|")]
             if len(parts) >= 7:
                 ip_str = parts[1]
-                if IP_RE.match(ip_str):
+                if _valid_ip(ip_str):
                     results[ip_str] = _parse_cymru_parts(ip_str, parts)
 
         # Fill in missing
@@ -136,8 +145,8 @@ def classify_provider(provider):
 
 
 def is_ip(text):
-    """Check if input is an IPv4 address."""
-    return bool(IP_RE.match(text.strip()))
+    """Check if input is an IPv4 or IPv6 address."""
+    return _valid_ip(text)
 
 
 def is_cdn_ip(ip):

@@ -2297,6 +2297,15 @@ def _run_trace(targets, args):
         report["traceroute"] = traceroute
         _clear_status()
 
+        # Phase 3b: IPv6 traceroute when the target is dual-stack (has AAAA).
+        # Primary path only (no multipath/NAT) to keep dual-stack runtime sane.
+        if _has_ipv6(domain):
+            status_cb("trace", "IPv6 traceroute")
+            sys.stderr.flush()
+            report["traceroute_v6"] = infra_trace.run_traceroute(
+                domain, on_status=status_cb, family="6", multipath=False)
+            _clear_status()
+
         # Phase 4: resolve direct IPs and traceroute to them
         direct_ips = _resolve_trace_ips(ip_mode, domain, report, status_cb)
         if direct_ips:
@@ -2360,6 +2369,46 @@ def _run_trace(targets, args):
         _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
     elif args.output:
         _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
+
+
+def _local_ipv6_capable():
+    """True only if THIS host can actually route IPv6 (has a global v6 route).
+
+    A UDP connect does a route lookup without sending packets: it fails with
+    'network unreachable' when there is no v6 route, and yields a global source
+    address when there is. This avoids false positives from a target's AAAA.
+    """
+    import socket
+    import ipaddress as _ip
+    s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    try:
+        s.connect(("2001:4860:4860::8888", 80))  # Google Public DNS (v6)
+        src = s.getsockname()[0].split("%")[0]
+        return _ip.ip_address(src).is_global
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _has_ipv6(domain):
+    """True if we can route IPv6 AND the target has a global AAAA record."""
+    import socket
+    import ipaddress as _ip
+    if not _local_ipv6_capable():
+        return False
+    try:
+        infos = socket.getaddrinfo(domain, None, socket.AF_INET6)
+    except (socket.gaierror, OSError):
+        return False
+    for info in infos:
+        addr = info[4][0].split("%")[0]
+        try:
+            if _ip.ip_address(addr).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _resolve_trace_ips(ip_mode, domain, report, status_cb):
@@ -2478,6 +2527,11 @@ def _print_trace_report(domain, report):
 
     # NAT detection (Dublin IP-ID; Linux + root)
     _print_nat(tr, BLUE)
+
+    # IPv6 traceroute (dual-stack targets)
+    tr6 = report.get("traceroute_v6")
+    if tr6 and (tr6.get("hops") or tr6.get("error")):
+        _print_traceroute_hops(tr6, "Network Traceroute (IPv6)", MAGENTA)
 
     # BGP AS path — shows intermediate networks when hops are filtered
     as_path = tr.get("as_path", [])
