@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from whatthewaf.modules.nat_detect import (  # noqa: E402
     _checksum16, _build_udp_probe, _wrap_icmp_time_exceeded,
-    _parse_icmp_time_exceeded, _nat_verdict, detect_nat,
+    _parse_icmp_time_exceeded, _nat_verdict, _nat_boundaries, detect_nat,
 )
 
 SRC, DST = "10.0.0.5", "93.184.216.34"
@@ -77,6 +77,34 @@ def test_truncated_inner_no_udp():
     assert p is not None and p["inner_sport"] is None
     assert p["inner_ip_id"] == 0x4202
     assert _nat_verdict(sent, p)["nat"] is False  # can't judge → not flagged
+
+
+def test_nat_boundaries():
+    # One home NAT: hop 1 clean, everything after rewritten → single boundary.
+    hops = [
+        {"ttl": 1, "router_ip": "192.168.1.1", "nat": False},
+        {"ttl": 2, "router_ip": "100.73.0.1", "nat": True},
+        {"ttl": 3, "router_ip": "10.0.0.1", "nat": True},
+        {"ttl": 4, "router_ip": "*", "nat": None},   # timeout doesn't reset
+        {"ttl": 5, "router_ip": "8.8.8.8", "nat": True},
+    ]
+    assert [h["ttl"] for h in _nat_boundaries(hops)] == [2]
+
+    # First hop already rewritten → boundary at hop 1.
+    assert [h["ttl"] for h in _nat_boundaries(
+        [{"ttl": 1, "router_ip": "10.0.0.1", "nat": True}])] == [1]
+
+    # Two separate NAT transitions.
+    two = [
+        {"ttl": 1, "router_ip": "a", "nat": False},
+        {"ttl": 2, "router_ip": "b", "nat": True},
+        {"ttl": 3, "router_ip": "c", "nat": False},
+        {"ttl": 4, "router_ip": "d", "nat": True},
+    ]
+    assert [h["ttl"] for h in _nat_boundaries(two)] == [2, 4]
+
+    # No NAT anywhere.
+    assert _nat_boundaries([{"ttl": 1, "router_ip": "a", "nat": False}]) == []
 
 
 def test_detect_nat_gated():

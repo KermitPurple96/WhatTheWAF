@@ -2546,16 +2546,18 @@ def _print_nat(tr, color):
         _line(f"{DIM}{nat.get('note', 'not supported on this platform')}{RESET}")
         return
 
-    nat_hops = nat.get("nat_hops", [])
+    boundaries = nat.get("nat_boundaries", [])
     _section("NAT Detection (Dublin IP-ID)", color)
-    if not nat_hops:
+    if not boundaries:
         _line(f"{DIM}No NAT rewriting observed along the path.{RESET}")
         return
 
-    _line(f"{RED}{BOLD}NAT detected{RESET} at {len(nat_hops)} hop(s):")
-    for h in nat_hops:
+    _line(f"{RED}{BOLD}NAT detected{RESET} — {len(boundaries)} boundary(ies) "
+          f"{DIM}(the packet is rewritten from here onward){RESET}:")
+    for h in boundaries:
         reason = h.get("reason", "")
-        _line(f"    {RED}hop {h['ttl']:<3} {h['router_ip']:<18}{RESET} {DIM}{reason}{RESET}")
+        _line(f"    {RED}before hop {h['ttl']:<3} {h['router_ip']:<18}{RESET} "
+              f"{DIM}{reason}{RESET}")
 
 
 def _print_multipath(tr, color):

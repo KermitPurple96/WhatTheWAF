@@ -141,6 +141,26 @@ def _nat_verdict(sent: Dict[str, int], parsed: Dict[str, Any]) -> Dict[str, Any]
     return {"nat": strong, "reason": ", ".join(reasons)}
 
 
+def _nat_boundaries(hops):
+    """Reduce per-hop rewrite flags to the actual NAT devices.
+
+    Once a packet crosses a NAT, the quoted probe stays rewritten for every hop
+    after it — so flagging each rewritten hop over-reports. A NAT *boundary* is a
+    rewritten hop whose previous responding hop was not rewritten; that transition
+    is where the NAT sits. Timeout (`*`) hops don't reset the state.
+    """
+    boundaries = []
+    prev_rw = False
+    for h in hops:
+        if h.get("router_ip") in (None, "*"):
+            continue
+        rw = bool(h.get("nat"))
+        if rw and not prev_rw:
+            boundaries.append(h)
+        prev_rw = rw
+    return boundaries
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Raw-socket probe loop (Linux + root)
 # ─────────────────────────────────────────────────────────────────────────
@@ -241,5 +261,7 @@ def detect_nat(domain: str, max_hops: int = 30, timeout: int = 2,
         send.close()
         recv.close()
 
+    boundaries = _nat_boundaries(hops)
     return {"supported": True, "src_ip": src_ip, "dst_ip": dst_ip,
-            "nat_detected": bool(nat_hops), "hops": hops, "nat_hops": nat_hops}
+            "nat_detected": bool(boundaries), "nat_boundaries": boundaries,
+            "nat_hops": nat_hops, "hops": hops}
