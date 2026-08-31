@@ -167,6 +167,14 @@ def _apply_profile(args):
 
 
 def main():
+    # Windows consoles default to cp1252 and crash on the box-drawing / arrow
+    # glyphs used throughout the report; force UTF-8 output where supported.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(
         description="WhatTheWAF - WAF/CDN Detection, Bypass, TLS Fingerprint Evasion & WAF Vulnerability Scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2456,6 +2464,9 @@ def _print_trace_report(domain, report):
     # ECMP / multipath enumeration (load-balanced paths)
     _print_multipath(tr, BLUE)
 
+    # NAT detection (Dublin IP-ID; Linux + root)
+    _print_nat(tr, BLUE)
+
     # BGP AS path — shows intermediate networks when hops are filtered
     as_path = tr.get("as_path", [])
     if as_path:
@@ -2523,6 +2534,28 @@ def _print_trace_report(domain, report):
             _line(f"{DIM}{insight}{RESET}")
 
     print()
+
+
+def _print_nat(tr, color):
+    """Print the NAT-detection summary (Dublin-style IP-ID probing)."""
+    nat = tr.get("nat")
+    if not nat:
+        return
+    if not nat.get("supported"):
+        _section("NAT Detection", color)
+        _line(f"{DIM}{nat.get('note', 'not supported on this platform')}{RESET}")
+        return
+
+    nat_hops = nat.get("nat_hops", [])
+    _section("NAT Detection (Dublin IP-ID)", color)
+    if not nat_hops:
+        _line(f"{DIM}No NAT rewriting observed along the path.{RESET}")
+        return
+
+    _line(f"{RED}{BOLD}NAT detected{RESET} at {len(nat_hops)} hop(s):")
+    for h in nat_hops:
+        reason = h.get("reason", "")
+        _line(f"    {RED}hop {h['ttl']:<3} {h['router_ip']:<18}{RESET} {DIM}{reason}{RESET}")
 
 
 def _print_multipath(tr, color):

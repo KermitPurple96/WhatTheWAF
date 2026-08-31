@@ -63,10 +63,29 @@ Parsers were lifted from nested closures to **module level** so they are unit-te
 Rendering: `cli.py::_print_multipath(tr, color)` prints an "ECMP / Multipath" section
 (distinct-path count, divergence hop, and per-balancer next-hop lists with ASN/role).
 
-## Out of scope (YAGNI / not feasible via subprocess)
+## NAT detection (Dublin-style, Linux + root)
 
-- **NAT detection** (Dublin proper): needs the returned IP-ID → raw sockets. Not done.
-- TCP multipath on Windows. Not possible with `tracert`.
+Added in `whatthewaf/modules/nat_detect.py`. Raw-socket UDP probes carry a known
+non-zero IP-ID and a fixed source port; routers quote the probe back inside their
+ICMP time-exceeded, and a NAT between us and a hop shows up as a rewritten source
+port / UDP checksum (strong signal) or IP-ID (weak) in the quoted packet.
+
+- `detect_nat(domain, ...)` gates on Linux + root; elsewhere returns
+  `{supported: False, note}` and renders a one-line note.
+- Byte-level helpers (`_checksum16`, `_build_udp_probe`, `_parse_icmp_time_exceeded`,
+  `_nat_verdict`, `_wrap_icmp_time_exceeded`) are pure and unit-tested on any platform
+  (`tests/test_nat_detect.py`); the raw-socket loop runs on the Linux lab.
+- Renderer: `cli.py::_print_nat` lists the hops where NAT rewriting was observed.
+
+## Still out of scope
+
+- TCP multipath on Windows. Not possible with `tracert` (ICMP-only, no flow control).
+
+## Windows console fix
+
+`--trace` previously crashed on a default Windows (cp1252) console at the box-drawing
+report header. `main()` now reconfigures stdout/stderr to UTF-8 (errors="replace"),
+so the whole report — including the arrow/box glyphs used throughout — renders.
 
 ## Testing
 

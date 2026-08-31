@@ -1507,6 +1507,16 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         result["multipath"] = summary
         result["paths"] = mp.get("paths", [])
 
+    # ── NAT detection (Dublin-style IP-ID probing; Linux + root only) ──
+    if multipath:
+        try:
+            from . import nat_detect
+            result["nat"] = nat_detect.detect_nat(
+                domain, max_hops=max_hops, timeout=min(timeout, 2),
+                on_status=_status)
+        except Exception:
+            pass
+
     # If many hops are filtered, fetch BGP AS path to show intermediate networks
     total = len(hops)
     filtered = sum(1 for h in hops if h["ip"] == "*")
