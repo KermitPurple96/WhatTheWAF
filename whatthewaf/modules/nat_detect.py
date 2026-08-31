@@ -207,6 +207,8 @@ def detect_nat(domain: str, max_hops: int = 30, timeout: int = 2,
 
     hops = []
     nat_hops = []
+    consecutive_miss = 0
+    seen_real = False
     try:
         for ttl in range(1, max_hops + 1):
             ip_id = (ip_id_base + ttl) & 0xFFFF
@@ -218,7 +220,14 @@ def detect_nat(domain: str, max_hops: int = 30, timeout: int = 2,
             parsed = _recv_match(recv, time.time() + timeout, dst_ip, dport)
             if not parsed:
                 hops.append({"ttl": ttl, "router_ip": "*", "nat": None, "reason": ""})
+                consecutive_miss += 1
+                # Targets that drop our UDP (CDNs, most web hosts) never send the
+                # final port-unreachable, so stop once the path clearly ended.
+                if seen_real and consecutive_miss >= 5:
+                    break
                 continue
+            consecutive_miss = 0
+            seen_real = True
             verdict = _nat_verdict(sent, parsed)
             rec = {"ttl": ttl, "router_ip": parsed["router_ip"],
                    "nat": verdict["nat"], "reason": verdict["reason"],
