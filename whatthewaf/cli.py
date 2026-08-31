@@ -2570,6 +2570,10 @@ def _print_traceroute_hops(tr, title, color):
             asn_str = f"AS{asn}" if asn else ""
             country_str = country if country else ""
 
+            # Packet-loss indicator (multi-probe stats)
+            loss = h.get("loss_pct") or 0
+            loss_tag = f" {RED}{loss:.0f}%loss{RESET}" if loss and loss > 0 else ""
+
             # Build the info string: provider or CDN name
             if cdn_provider:
                 info = cdn_provider
@@ -2585,7 +2589,7 @@ def _print_traceroute_hops(tr, title, color):
             # Main hop line
             _line(
                 f"{c}{hop_num:>2}  {ip:<18} {rtt_str:>7}  "
-                f"{asn_str:<8} {info:<25} {country_str:<3} {role_str}{RESET}{boundary}"
+                f"{asn_str:<8} {info:<25} {country_str:<3} {role_str}{RESET}{boundary}{loss_tag}"
             )
 
             # Detail line: hostname, prefix, POP detection
@@ -2594,6 +2598,16 @@ def _print_traceroute_hops(tr, title, color):
                 details.append(hostname[:50])
             if bgp_prefix:
                 details.append(bgp_prefix)
+            # Latency spread / jitter from multiple probes
+            best_ms = h.get("best_ms")
+            worst_ms = h.get("worst_ms")
+            stddev_ms = h.get("stddev_ms")
+            if worst_ms is not None and h.get("recv", 0) > 1 and worst_ms != best_ms:
+                details.append(f"{best_ms:.1f}–{worst_ms:.1f}ms ±{stddev_ms:.1f}")
+            # MPLS backbone labels (GNU traceroute -e)
+            mpls = h.get("mpls")
+            if mpls:
+                details.append("MPLS L=" + ",".join(str(x["label"]) for x in mpls))
             # Detect CDN POP from hostname (e.g. mad56 from cloudfront, ams from akamai)
             if hostname and cdn_provider:
                 pop = _extract_pop(hostname, cdn_provider)

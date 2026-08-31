@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -1100,45 +1101,104 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     _status = on_status or (lambda *a: None)
     result = {"hops": [], "methods": [], "target_ip": ""}
 
+    def _stats(rtts: List[float], timeouts: int) -> Dict[str, Any]:
+        """Compute per-hop statistics from RTT samples and a timeout count."""
+        recv = len(rtts)
+        sent = recv + timeouts
+        out: Dict[str, Any] = {
+            "sent": sent, "recv": recv,
+            "loss_pct": round(timeouts / sent * 100, 1) if sent else 0.0,
+        }
+        if rtts:
+            avg = sum(rtts) / recv
+            var = sum((x - avg) ** 2 for x in rtts) / recv
+            out["best_ms"] = round(min(rtts), 3)
+            out["worst_ms"] = round(max(rtts), 3)
+            out["avg_ms"] = round(avg, 3)
+            out["stddev_ms"] = round(var ** 0.5, 3)
+            out["rtts"] = [round(x, 3) for x in rtts]
+            out["rtt_ms"] = round(avg, 3)   # headline value (backwards-compatible)
+        else:
+            out["rtt_ms"] = None
+        return out
+
+    def _parse_mpls(text: str) -> List[Dict]:
+        """Parse GNU traceroute -e MPLS stacks: <MPLS:L=24012,E=0,S=1,T=1>."""
+        labels = []
+        for lbl, exp, s, ttl in re.findall(
+                r'MPLS:?\s*L=(\d+),\s*E=(\d+),\s*S=(\d+),\s*T=(\d+)', text):
+            labels.append({"label": int(lbl), "exp": int(exp),
+                           "s": int(s), "ttl": int(ttl)})
+        return labels
+
     def _parse_traceroute(output: str) -> List[Dict]:
-        """Parse traceroute output into hop list."""
+        """Parse GNU/BSD traceroute output (multi-probe stats, MPLS-aware)."""
         hops = []
         for line in output.strip().split("\n"):
             line = line.strip()
             if not line or line.startswith("traceroute"):
                 continue
-            # Parse: " 1  hostname (IP)  1.234 ms" or " 1  IP  1.234 ms" or " 1  * * *"
+            # Parse: " 1  IP  1.2 ms  1.1 ms  1.0 ms" / " 3  * * *" / MPLS blocks
             m = re.match(r'\s*(\d+)\s+(.+)', line)
             if not m:
                 continue
             hop_num = int(m.group(1))
             rest = m.group(2)
 
-            if rest.strip() == "*" or rest.strip().startswith("* "):
-                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None})
-                continue
-
-            # Extract IP — could be "hostname (IP)" or just "IP"
+            # Extract first IP (hop may show multiple on ECMP — take first for now)
             ip_match = re.search(r'\(?((?:\d{1,3}\.){3}\d{1,3})\)?', rest)
             if not ip_match:
-                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None})
+                # Whole hop timed out (e.g. "* * *")
+                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
+                             "sent": rest.count("*") or None, "recv": 0,
+                             "loss_pct": 100.0})
                 continue
 
             ip = ip_match.group(1)
-
-            # Extract RTT
-            rtt_match = re.search(r'([\d.]+)\s*ms', rest)
-            rtt = float(rtt_match.group(1)) if rtt_match else None
-
-            hops.append({"hop": hop_num, "ip": ip, "rtt_ms": rtt})
+            rtts = [float(x) for x in re.findall(r'([\d.]+)\s*ms', rest)]
+            timeouts = rest.count("*")
+            hop: Dict[str, Any] = {"hop": hop_num, "ip": ip}
+            hop.update(_stats(rtts, timeouts))
+            mpls = _parse_mpls(rest)
+            if mpls:
+                hop["mpls"] = mpls
+            hops.append(hop)
         return hops
 
-    def _run_cmd(cmd: List[str], label: str) -> Optional[List[Dict]]:
+    def _parse_tracert(output: str) -> List[Dict]:
+        """Parse Windows tracert output (3 probes/hop, RTT columns in ms)."""
+        hops = []
+        for line in output.split("\n"):
+            m = re.match(r'\s*(\d+)\s+(.+)', line.rstrip())
+            if not m:
+                continue
+            hop_num = int(m.group(1))
+            rest = m.group(2)
+            # RTT columns look like "<1 ms", "10 ms", or "*"
+            rtts = [0.5 if v.startswith("<") else float(v)
+                    for v in re.findall(r'(<?\d+)\s*ms', rest)]
+            timeouts = len(re.findall(r'\*', rest))
+            ip_match = re.search(r'((?:\d{1,3}\.){3}\d{1,3})', rest)
+            if not ip_match:
+                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
+                             "sent": timeouts or None, "recv": 0,
+                             "loss_pct": 100.0})
+                continue
+            hop: Dict[str, Any] = {"hop": hop_num, "ip": ip_match.group(1)}
+            hop.update(_stats(rtts, timeouts))
+            hops.append(hop)
+        return hops
+
+    def _run_cmd(cmd: List[str], parser) -> Optional[List[Dict]]:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=max_hops * timeout + 10)
-            if proc.returncode == 0 and proc.stdout.strip():
-                return _parse_traceroute(proc.stdout)
+                                  errors="replace",
+                                  timeout=max_hops * timeout + 30)
+            # tracert/traceroute can exit non-zero yet still print usable hops
+            if proc.stdout and proc.stdout.strip():
+                parsed = parser(proc.stdout)
+                if parsed:
+                    return parsed
         except FileNotFoundError:
             pass
         except subprocess.TimeoutExpired:
@@ -1147,52 +1207,66 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
             pass
         return None
 
-    # Run ICMP, UDP and TCP traceroutes in parallel
+    # Run traceroutes in parallel across protocols
     methods = []
     needs_root = False
 
-    # Build command list: (cmd, label, needs_root)
+    # Build command list: (cmd, label, needs_root, parser)
     cmds = []
     tr_bin = shutil.which("traceroute")
     tcptr_bin = shutil.which("tcptraceroute")
-    is_root = os.geteuid() == 0
+    # MPLS/ICMP extensions (-e) are a GNU/Linux traceroute feature; BSD/macOS
+    # traceroute rejects the flag and would fail the whole probe, so gate it.
+    mpls_flag = ["-e"] if sys.platform.startswith("linux") else []
 
-    if tr_bin:
+    if os.name == "nt" and not tr_bin:
+        # Windows: built-in tracert (ICMP, 3 probes/hop, no admin). -w is in ms.
+        tracert_bin = shutil.which("tracert") or "tracert"
+        cmds.append((
+            [tracert_bin, "-d", "-h", str(max_hops),
+             "-w", str(timeout * 1000), domain],
+            "icmp(tracert)", False, _parse_tracert
+        ))
+    elif tr_bin:
         # ICMP (works without root on most systems, best firewall penetration)
         cmds.append((
-            [tr_bin, "-I", "-n", "-q", "1", "-m", str(max_hops),
+            [tr_bin, "-I", *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
              "-w", str(timeout), domain],
-            "icmp", False
+            "icmp", False, _parse_traceroute
         ))
         # UDP (default traceroute, different filtering behavior than ICMP)
         cmds.append((
-            [tr_bin, "-n", "-q", "1", "-m", str(max_hops),
+            [tr_bin, *mpls_flag, "-n", "-q", "3", "-m", str(max_hops),
              "-w", str(timeout), domain],
-            "udp", False
+            "udp", False, _parse_traceroute
         ))
         # TCP on port 443 (needs root or setuid — best for web targets)
-        tcp_cmd = [tr_bin, "-T", "-p", "443", "-n", "-q", "1",
-                   "-m", str(max_hops), "-w", str(timeout), domain]
-        cmds.append((tcp_cmd, "tcp:443", True))
+        cmds.append((
+            [tr_bin, "-T", "-p", "443", *mpls_flag, "-n", "-q", "3",
+             "-m", str(max_hops), "-w", str(timeout), domain],
+            "tcp:443", True, _parse_traceroute
+        ))
 
     if tcptr_bin:
-        tcp2_cmd = [tcptr_bin, "-n", "-q", "1",
-                    "-m", str(max_hops), "-w", str(timeout), domain, "443"]
-        cmds.append((tcp2_cmd, "tcptraceroute", True))
+        cmds.append((
+            [tcptr_bin, "-n", "-q", "3",
+             "-m", str(max_hops), "-w", str(timeout), domain, "443"],
+            "tcptraceroute", True, _parse_traceroute
+        ))
 
     if not cmds:
         result["methods"] = []
         result["error"] = "traceroute not installed"
         return result
 
-    _status("trace", "Network traceroute (ICMP + UDP + TCP:443)")
+    _status("trace", "Network traceroute (" + " + ".join(c[1] for c in cmds) + ")")
 
     all_results = {}  # label -> hops
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = {}
-        for cmd, label, root in cmds:
-            futures[pool.submit(_run_cmd, cmd, label)] = (label, root)
+        for cmd, label, root, parser in cmds:
+            futures[pool.submit(_run_cmd, cmd, parser)] = (label, root)
 
         for f in concurrent.futures.as_completed(futures):
             label, root = futures[f]
@@ -1210,8 +1284,9 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
 
     # Merge all methods: prefer real IPs over *, priority TCP > ICMP > UDP
     merged = {}
-    priority = ["udp", "icmp", "tcp:443", "tcptraceroute"]
-    for label in priority:
+    priority = ["udp", "icmp", "tcp:443", "tcptraceroute", "icmp(tracert)"]
+    ordered = priority + [l for l in all_results if l not in priority]
+    for label in ordered:
         for h in all_results.get(label, []):
             hop_n = h["hop"]
             if hop_n not in merged or (h["ip"] != "*" and merged[hop_n]["ip"] == "*"):
