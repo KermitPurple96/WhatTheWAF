@@ -1227,23 +1227,28 @@ def _enumerate_multipath(domain: str, max_hops: int, timeout: int,
 
     mpls_flag = ["-e"] if sys.platform.startswith("linux") else []
     transport = "tcp:443" if is_root else "udp"
+    # ECMP branching we can observe is in the ISP/transit portion; cap the flow
+    # depth and shorten the wait so 8 (serialised, root/TCP) flows stay tolerable.
+    mp_hops = str(min(max_hops, 20))
+    mp_wait = str(min(timeout, 2))
 
     # Build one command per flow with a distinct, fixed flow identifier.
     tasks = []  # (flow_id, port, cmd)
     for k in range(flows):
         if is_root:
-            # Fix dst=443, vary source port. --sport implies -N 1 (serialised).
+            # Fix dst=443, vary source port. GNU traceroute needs --sport=NUM
+            # (not space-separated); --sport implies -N 1 (serialised).
             sport = 33000 + k
-            cmd = [tr_bin, "-T", "-p", "443", "--sport", str(sport),
-                   *mpls_flag, "-n", "-q", "1", "-m", str(max_hops),
-                   "-w", str(timeout), domain]
+            cmd = [tr_bin, "-T", "-p", "443", f"--sport={sport}",
+                   *mpls_flag, "-n", "-q", "1", "-m", mp_hops,
+                   "-w", mp_wait, domain]
             tasks.append((k, sport, cmd))
         else:
             # -U = fixed UDP dst port (Paris); vary it across flows.
             dport = 33434 + k
             cmd = [tr_bin, "-U", "-p", str(dport), *mpls_flag,
-                   "-n", "-q", "1", "-N", "16", "-m", str(max_hops),
-                   "-w", str(timeout), domain]
+                   "-n", "-q", "1", "-N", "16", "-m", mp_hops,
+                   "-w", mp_wait, domain]
             tasks.append((k, dport, cmd))
 
     on_status("trace", f"Multipath ECMP enumeration ({flows} flows, {transport})")
@@ -1278,11 +1283,7 @@ def _build_multipath_summary(paths: List[Dict], asn_map: Dict,
         summary["branches"] = {}
         return summary
 
-    # Distinct end-to-end paths (by IP-per-hop signature).
-    signatures = {_path_signature(p["hops"]) for p in paths}
-    summary["distinct_paths"] = len(signatures)
-
-    # Per-TTL set of distinct real IPs across all flows.
+    # Per-TTL set of distinct real (public) IPs across all flows.
     by_ttl: Dict[int, set] = {}
     for p in paths:
         for h in p["hops"]:
@@ -1290,6 +1291,7 @@ def _build_multipath_summary(paths: List[Dict], asn_map: Dict,
             if ip and ip != "*" and not _is_private(ip):
                 by_ttl.setdefault(h["hop"], set()).add(ip)
 
+    # A branch is a TTL where flows saw >1 distinct real next-hop (a balancer).
     branches: Dict[int, List[Dict]] = {}
     for ttl, ips in by_ttl.items():
         if len(ips) < 2:
@@ -1310,8 +1312,27 @@ def _build_multipath_summary(paths: List[Dict], asn_map: Dict,
             entries.append(entry)
         branches[ttl] = entries
 
+    # distinct_paths counts genuinely different routes THROUGH the balancer
+    # points, ignoring hops that merely timed out in some flows. With no branch,
+    # every flow followed the same observed routers → one effective path.
+    if not branches:
+        has_path = any(_path_signature(p["hops"]) for p in paths)
+        summary["distinct_paths"] = 1 if has_path else 0
+        summary["divergence_hop"] = None
+        summary["branches"] = {}
+        return summary
+
+    branch_ttls = sorted(branches)
+    sigs = set()
+    for p in paths:
+        ip_by_ttl = {h["hop"]: h.get("ip", "*") for h in p["hops"]}
+        sig = tuple(ip_by_ttl.get(t, "?") for t in branch_ttls)
+        if any(x not in ("*", "?") for x in sig):
+            sigs.add(sig)
+
+    summary["distinct_paths"] = len(sigs)
     summary["branches"] = branches
-    summary["divergence_hop"] = min(branches) if branches else None
+    summary["divergence_hop"] = min(branch_ttls)
     return summary
 
 

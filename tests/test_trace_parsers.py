@@ -129,6 +129,20 @@ def test_multipath_summary():
     s3 = _build_multipath_summary([], {}, {})
     assert s3["flows_sent"] == 0 and s3["distinct_paths"] == 0
 
+    # A hop that merely timed out in one flow is NOT a divergence (no real
+    # second next-hop at that TTL) → one effective path, no branches.
+    noisy = [
+        {"flow_id": 0, "hops": [{"hop": 1, "ip": "203.0.113.1"},
+                                {"hop": 2, "ip": "198.51.100.1"},
+                                {"hop": 3, "ip": "93.184.216.34"}]},
+        {"flow_id": 1, "hops": [{"hop": 1, "ip": "203.0.113.1"},
+                                {"hop": 2, "ip": "*"},
+                                {"hop": 3, "ip": "93.184.216.34"}]},
+    ]
+    s4 = _build_multipath_summary(noisy, {}, {})
+    assert s4["branches"] == {} and s4["divergence_hop"] is None
+    assert s4["distinct_paths"] == 1
+
 
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
