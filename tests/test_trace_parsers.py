@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from whatthewaf.modules.infra_trace import (  # noqa: E402
     _tr_stats, _parse_traceroute, _parse_tracert, _parse_mpls,
-    _path_signature, _build_multipath_summary,
+    _path_signature, _build_multipath_summary, build_trace_graph,
 )
 
 
@@ -142,6 +142,44 @@ def test_multipath_summary():
     s4 = _build_multipath_summary(noisy, {}, {})
     assert s4["branches"] == {} and s4["divergence_hop"] is None
     assert s4["distinct_paths"] == 1
+
+
+TR_FIXTURE = {
+    "target_ip": "93.184.216.34",
+    "hops": [
+        {"hop": 1, "ip": "192.168.1.1", "role": "local"},
+        {"hop": 2, "ip": "203.0.113.1", "role": "isp", "provider": "EXAMPLE-ISP, US"},
+        {"hop": 3, "ip": "198.51.100.1", "role": "cdn", "cdn_provider": "fastly"},
+    ],
+    "multipath": {"branches": {3: [
+        {"ip": "198.51.100.1", "provider": "fastly", "role": "cdn"},
+        {"ip": "198.51.100.2", "provider": "fastly", "role": "cdn"},
+    ]}},
+    "nat": {"nat_boundaries": [{"ttl": 2, "router_ip": "203.0.113.1"}]},
+}
+
+
+def test_trace_graph_mermaid():
+    g = build_trace_graph(TR_FIXTURE, "example.com", "mermaid")
+    assert g.startswith("flowchart TD")
+    for nid in ("SRC", "H1[", "H2[", "H3[", "DST"):
+        assert nid in g
+    assert "-. NAT .->" in g          # NAT boundary edge into hop 2
+    assert "|ECMP|" in g              # ECMP branch at hop 3
+    assert "198.51.100.2" in g        # the alternate next-hop
+
+
+def test_trace_graph_dot():
+    d = build_trace_graph(TR_FIXTURE, "example.com", "dot")
+    assert d.startswith("digraph trace {") and d.rstrip().endswith("}")
+    assert "SRC ->" in d and "-> DST" in d
+    assert "NAT" in d and "ECMP" in d and "198.51.100.2" in d
+
+
+def test_trace_graph_empty():
+    # No hops → still valid, just source→dest.
+    g = build_trace_graph({"hops": []}, "example.com", "mermaid")
+    assert "flowchart TD" in g and "SRC" in g and "DST" in g
 
 
 def main():

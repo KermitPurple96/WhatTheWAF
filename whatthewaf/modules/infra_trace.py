@@ -1551,6 +1551,81 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Trace topology graph (Mermaid / Graphviz DOT) — pure, unit-testable
+# ─────────────────────────────────────────────────────────────────────────
+
+def _graph_label(hop: Dict[str, Any]) -> str:
+    """Short label for a hop: 'ttl · ip' plus provider/CDN or role."""
+    sub = (hop.get("cdn_provider") or hop.get("provider") or "").split(",")[0].strip()
+    sub = sub or hop.get("role", "")
+    text = f"{hop['hop']} · {hop['ip']}"
+    if sub:
+        text += f"  {sub}"
+    # Strip characters that break Mermaid/DOT label syntax.
+    return re.sub(r'["\[\]{}|<>]', "", text)[:44]
+
+
+def build_trace_graph(tr: Dict[str, Any], domain: str, fmt: str = "mermaid") -> str:
+    """Render the traceroute as a graph: linear path + ECMP branches + NAT marks.
+
+    fmt: "mermaid" (default) or "dot". Returns the graph as text.
+    """
+    hops = [h for h in tr.get("hops", []) if h.get("ip") not in (None, "*")]
+    nat_ttls = {h["ttl"] for h in (tr.get("nat") or {}).get("nat_boundaries", [])}
+    branches = (tr.get("multipath") or {}).get("branches", {}) or {}
+    target = tr.get("target_ip", "") or domain
+    dst_label = re.sub(r'["\[\]{}|<>]', "", f"{domain} {target}")[:44]
+
+    if fmt == "dot":
+        lines = ['digraph trace {', '  rankdir=TB; node [shape=box, fontname="monospace"];',
+                 '  SRC [label="you", shape=oval];']
+        prev = "SRC"
+        for h in hops:
+            nid = f"H{h['hop']}"
+            lines.append(f'  {nid} [label="{_graph_label(h)}"];')
+            style = ' [label="NAT", style=dashed, color=red]' if h["hop"] in nat_ttls else ''
+            lines.append(f'  {prev} -> {nid}{style};')
+            for i, e in enumerate(branches.get(h["hop"], [])):
+                if e["ip"] == h["ip"]:
+                    continue
+                bid = f"H{h['hop']}b{i}"
+                lbl = _graph_label({"hop": h["hop"], "ip": e["ip"],
+                                    "provider": e.get("provider"),
+                                    "cdn_provider": e.get("cdn_provider"),
+                                    "role": e.get("role", "")})
+                lines.append(f'  {bid} [label="{lbl}", color=orange];')
+                lines.append(f'  {prev} -> {bid} [label="ECMP", color=orange];')
+            prev = nid
+        lines.append(f'  DST [label="{dst_label}", shape=oval];')
+        lines.append(f'  {prev} -> DST;')
+        lines.append('}')
+        return "\n".join(lines)
+
+    # Mermaid (default)
+    lines = ["flowchart TD", '  SRC(["you"])']
+    prev = "SRC"
+    for h in hops:
+        nid = f"H{h['hop']}"
+        lines.append(f'  {nid}["{_graph_label(h)}"]')
+        edge = "-. NAT .->" if h["hop"] in nat_ttls else "-->"
+        lines.append(f"  {prev} {edge} {nid}")
+        for i, e in enumerate(branches.get(h["hop"], [])):
+            if e["ip"] == h["ip"]:
+                continue
+            bid = f"H{h['hop']}b{i}"
+            lbl = _graph_label({"hop": h["hop"], "ip": e["ip"],
+                                "provider": e.get("provider"),
+                                "cdn_provider": e.get("cdn_provider"),
+                                "role": e.get("role", "")})
+            lines.append(f'  {bid}["{lbl}"]')
+            lines.append(f"  {prev} -->|ECMP| {bid}")
+        prev = nid
+    lines.append(f'  DST(["{dst_label}"])')
+    lines.append(f"  {prev} --> DST")
+    return "\n".join(lines)
+
+
 def _get_upstream_asns(asn, timeout=5):
     """Get upstream/peer ASNs for a given AS via RIPE RIS."""
     import urllib.request

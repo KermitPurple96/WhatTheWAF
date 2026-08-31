@@ -221,6 +221,9 @@ def main():
     parser.add_argument("--history", action="store_true", help="Check historical DNS records")
     parser.add_argument("--evasion", action="store_true", help="Run WAF evasion analysis (UA, encoding, methods)")
     parser.add_argument("--trace", action="store_true", help="Trace infrastructure chain (CDN → proxy → origin) with full TLS audit")
+    parser.add_argument("--trace-graph", nargs="?", const="mermaid", choices=["mermaid", "dot"],
+                        default=None, metavar="FMT",
+                        help="Emit the traceroute path (with ECMP branches + NAT marks) as a Mermaid or DOT graph")
     parser.add_argument("--tls", action="store_true", help="TLS/SSL audit: protocols, ciphers, certificate, vulnerabilities")
     parser.add_argument("--proxy-chain", metavar="PROXIES", help="Comma-separated proxy URLs to test")
     parser.add_argument("--proton", action="store_true", help="Use ProtonVPN SOCKS proxy (socks5://127.0.0.1:1080)")
@@ -2343,6 +2346,15 @@ def _run_trace(targets, args):
 
         if not is_json:
             _print_trace_report(domain, report)
+
+        if getattr(args, "trace_graph", None):
+            graph = infra_trace.build_trace_graph(
+                report.get("traceroute", {}), domain, fmt=args.trace_graph)
+            if not is_json:
+                fence = "mermaid" if args.trace_graph == "mermaid" else "dot"
+                _section(f"Trace Graph ({args.trace_graph})", BLUE)
+                print(f"```{fence}\n{graph}\n```")
+            report["trace_graph"] = graph
 
     if is_json:
         _write_output(json.dumps(all_reports, indent=2, default=str), args.output)
