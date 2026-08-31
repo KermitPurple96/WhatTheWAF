@@ -2293,7 +2293,8 @@ def _run_trace(targets, args):
             for ip in direct_ips:
                 status_cb("trace", f"Traceroute → {ip} (direct)")
                 sys.stderr.flush()
-                tr_direct = infra_trace.run_traceroute(ip, on_status=status_cb)
+                tr_direct = infra_trace.run_traceroute(ip, on_status=status_cb,
+                                                       multipath=False)
                 report["traceroute_direct"][ip] = tr_direct
                 _clear_status()
 
@@ -2452,6 +2453,9 @@ def _print_trace_report(domain, report):
     tr = report.get("traceroute", {})
     _print_traceroute_hops(tr, f"Network Traceroute", BLUE)
 
+    # ECMP / multipath enumeration (load-balanced paths)
+    _print_multipath(tr, BLUE)
+
     # BGP AS path — shows intermediate networks when hops are filtered
     as_path = tr.get("as_path", [])
     if as_path:
@@ -2519,6 +2523,53 @@ def _print_trace_report(domain, report):
             _line(f"{DIM}{insight}{RESET}")
 
     print()
+
+
+def _print_multipath(tr, color):
+    """Print the ECMP / multipath enumeration summary (load-balanced paths)."""
+    mp = tr.get("multipath")
+    if not mp:
+        return
+
+    if not mp.get("supported"):
+        _section("ECMP / Multipath", color)
+        _line(f"{DIM}{mp.get('note', 'not supported on this platform')}{RESET}")
+        return
+
+    flows = mp.get("flows_sent", 0)
+    distinct = mp.get("distinct_paths", 0)
+    transport = mp.get("transport", "")
+    branches = mp.get("branches", {}) or {}
+    div = mp.get("divergence_hop")
+
+    _section(f"ECMP / Multipath ({flows} flows, {transport})", color)
+
+    if distinct <= 1 or not branches:
+        _line(f"{DIM}No load balancing detected — {distinct} path across {flows} flows.{RESET}")
+        return
+
+    div_txt = f", first diverging at hop {div}" if div is not None else ""
+    _line(f"{BOLD}{distinct} distinct paths{RESET} across {flows} flows{div_txt}.")
+    print()
+
+    _ROLE_C = {
+        "isp": WHITE, "transit": CYAN, "ixp": MAGENTA,
+        "cdn": RED, "cloud": YELLOW, "hosting": GREEN, "local": DIM,
+    }
+    for ttl in sorted(branches, key=lambda x: int(x)):
+        entries = branches[ttl]
+        _line(f"{BOLD}hop {ttl}{RESET}  {DIM}↳ {len(entries)} next-hops (load balancer){RESET}")
+        for e in entries:
+            role = e.get("role", "isp")
+            c = _ROLE_C.get(role, WHITE)
+            asn_str = f"AS{e['asn']}" if e.get("asn") else ""
+            prov = (e.get("cdn_provider") or e.get("provider") or "").split(",")[0].strip()[:28]
+            country = e.get("country", "") or ""
+            role_str = f"[{role}]" if role else ""
+            _line(f"    {c}{e['ip']:<18} {asn_str:<8} {prov:<28} {country:<3} {role_str}{RESET}")
+            host = e.get("hostname", "")
+            if host and host != e["ip"]:
+                _line(f"{DIM}    {'':18} {host[:50]}{RESET}")
 
 
 def _print_traceroute_hops(tr, title, color):

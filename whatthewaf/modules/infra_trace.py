@@ -1082,8 +1082,251 @@ def _deduplicate(nodes):
 #  Network traceroute (ICMP/UDP + TCP layers)
 # ──────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────
+# Traceroute output parsers (module-level for reuse + unit testing)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _tr_stats(rtts: List[float], timeouts: int) -> Dict[str, Any]:
+    """Compute per-hop statistics from RTT samples and a timeout count."""
+    recv = len(rtts)
+    sent = recv + timeouts
+    out: Dict[str, Any] = {
+        "sent": sent, "recv": recv,
+        "loss_pct": round(timeouts / sent * 100, 1) if sent else 0.0,
+    }
+    if rtts:
+        avg = sum(rtts) / recv
+        var = sum((x - avg) ** 2 for x in rtts) / recv
+        out["best_ms"] = round(min(rtts), 3)
+        out["worst_ms"] = round(max(rtts), 3)
+        out["avg_ms"] = round(avg, 3)
+        out["stddev_ms"] = round(var ** 0.5, 3)
+        out["rtts"] = [round(x, 3) for x in rtts]
+        out["rtt_ms"] = round(avg, 3)   # headline value (backwards-compatible)
+    else:
+        out["rtt_ms"] = None
+    return out
+
+
+def _parse_mpls(text: str) -> List[Dict]:
+    """Parse GNU traceroute -e MPLS stacks: <MPLS:L=24012,E=0,S=1,T=1>."""
+    labels = []
+    for lbl, exp, s, ttl in re.findall(
+            r'MPLS:?\s*L=(\d+),\s*E=(\d+),\s*S=(\d+),\s*T=(\d+)', text):
+        labels.append({"label": int(lbl), "exp": int(exp),
+                       "s": int(s), "ttl": int(ttl)})
+    return labels
+
+
+def _parse_traceroute(output: str) -> List[Dict]:
+    """Parse GNU/BSD traceroute output (multi-probe stats, MPLS-aware)."""
+    hops = []
+    for line in output.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("traceroute"):
+            continue
+        # Parse: " 1  IP  1.2 ms  1.1 ms  1.0 ms" / " 3  * * *" / MPLS blocks
+        m = re.match(r'\s*(\d+)\s+(.+)', line)
+        if not m:
+            continue
+        hop_num = int(m.group(1))
+        rest = m.group(2)
+
+        # Extract first IP (hop may show multiple on ECMP — take first here)
+        ip_match = re.search(r'\(?((?:\d{1,3}\.){3}\d{1,3})\)?', rest)
+        if not ip_match:
+            # Whole hop timed out (e.g. "* * *")
+            hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
+                         "sent": rest.count("*") or None, "recv": 0,
+                         "loss_pct": 100.0})
+            continue
+
+        ip = ip_match.group(1)
+        rtts = [float(x) for x in re.findall(r'([\d.]+)\s*ms', rest)]
+        timeouts = rest.count("*")
+        hop: Dict[str, Any] = {"hop": hop_num, "ip": ip}
+        hop.update(_tr_stats(rtts, timeouts))
+        mpls = _parse_mpls(rest)
+        if mpls:
+            hop["mpls"] = mpls
+        hops.append(hop)
+    return hops
+
+
+def _parse_tracert(output: str) -> List[Dict]:
+    """Parse Windows tracert output (3 probes/hop, RTT columns in ms)."""
+    hops = []
+    for line in output.split("\n"):
+        m = re.match(r'\s*(\d+)\s+(.+)', line.rstrip())
+        if not m:
+            continue
+        hop_num = int(m.group(1))
+        rest = m.group(2)
+        # RTT columns look like "<1 ms", "10 ms", or "*"
+        rtts = [0.5 if v.startswith("<") else float(v)
+                for v in re.findall(r'(<?\d+)\s*ms', rest)]
+        timeouts = len(re.findall(r'\*', rest))
+        ip_match = re.search(r'((?:\d{1,3}\.){3}\d{1,3})', rest)
+        if not ip_match:
+            hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
+                         "sent": timeouts or None, "recv": 0,
+                         "loss_pct": 100.0})
+            continue
+        hop: Dict[str, Any] = {"hop": hop_num, "ip": ip_match.group(1)}
+        hop.update(_tr_stats(rtts, timeouts))
+        hops.append(hop)
+    return hops
+
+
+def _run_tr_cmd(cmd: List[str], parser, timeout: int, max_hops: int) -> Optional[List[Dict]]:
+    """Run one traceroute/tracert command and parse its output; None on failure."""
+    import subprocess
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace",
+                              timeout=max_hops * timeout + 30)
+        # tracert/traceroute can exit non-zero yet still print usable hops
+        if proc.stdout and proc.stdout.strip():
+            parsed = parser(proc.stdout)
+            if parsed:
+                return parsed
+    except FileNotFoundError:
+        pass
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def _path_signature(hops: List[Dict]) -> Tuple:
+    """Canonical signature of a path (IP per hop, trailing timeouts trimmed)."""
+    ips = [h.get("ip", "*") for h in hops]
+    while ips and ips[-1] == "*":
+        ips.pop()
+    return tuple(ips)
+
+
+def _enumerate_multipath(domain: str, max_hops: int, timeout: int,
+                         is_root: bool, on_status, flows: int = 8) -> Dict[str, Any]:
+    """Enumerate ECMP paths by tracing several distinct L4 flows in parallel.
+
+    GNU traceroute is Paris-consistent within a run (fixed flow-id); varying the
+    flow-id across runs enumerates load-balanced paths (Dublin-style). We vary the
+    TCP source port (dst stays 443) with root, or the UDP dest port without root.
+    Not available on Windows (tracert is ICMP-only and cannot set the flow-id).
+    """
+    import shutil
+    import concurrent.futures
+
+    tr_bin = shutil.which("traceroute")
+    if os.name == "nt" or not tr_bin:
+        return {"paths": [], "supported": False,
+                "note": "multipath needs GNU traceroute (Linux); "
+                        "tracert/Windows cannot vary the flow-id"}
+
+    mpls_flag = ["-e"] if sys.platform.startswith("linux") else []
+    transport = "tcp:443" if is_root else "udp"
+
+    # Build one command per flow with a distinct, fixed flow identifier.
+    tasks = []  # (flow_id, port, cmd)
+    for k in range(flows):
+        if is_root:
+            # Fix dst=443, vary source port. --sport implies -N 1 (serialised).
+            sport = 33000 + k
+            cmd = [tr_bin, "-T", "-p", "443", "--sport", str(sport),
+                   *mpls_flag, "-n", "-q", "1", "-m", str(max_hops),
+                   "-w", str(timeout), domain]
+            tasks.append((k, sport, cmd))
+        else:
+            # -U = fixed UDP dst port (Paris); vary it across flows.
+            dport = 33434 + k
+            cmd = [tr_bin, "-U", "-p", str(dport), *mpls_flag,
+                   "-n", "-q", "1", "-N", "16", "-m", str(max_hops),
+                   "-w", str(timeout), domain]
+            tasks.append((k, dport, cmd))
+
+    on_status("trace", f"Multipath ECMP enumeration ({flows} flows, {transport})")
+
+    paths = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(flows, 8)) as pool:
+        futs = {}
+        for k, port, cmd in tasks:
+            futs[pool.submit(_run_tr_cmd, cmd, _parse_traceroute, timeout, max_hops)] = (k, port)
+        for f in concurrent.futures.as_completed(futs):
+            k, port = futs[f]
+            hops = f.result()
+            if hops:
+                paths.append({"flow_id": k, "transport": transport,
+                              "port": port, "hops": hops})
+
+    paths.sort(key=lambda p: p["flow_id"])
+    return {"paths": paths, "supported": True, "transport": transport}
+
+
+def _build_multipath_summary(paths: List[Dict], asn_map: Dict,
+                             rdns_map: Dict) -> Dict[str, Any]:
+    """Collapse per-flow paths into an ECMP divergence map.
+
+    Returns distinct_paths count, the first hop where paths diverge, and per-TTL
+    branches listing every distinct next-hop IP (enriched) seen at that TTL.
+    """
+    summary: Dict[str, Any] = {"flows_sent": len(paths)}
+    if not paths:
+        summary["distinct_paths"] = 0
+        summary["divergence_hop"] = None
+        summary["branches"] = {}
+        return summary
+
+    # Distinct end-to-end paths (by IP-per-hop signature).
+    signatures = {_path_signature(p["hops"]) for p in paths}
+    summary["distinct_paths"] = len(signatures)
+
+    # Per-TTL set of distinct real IPs across all flows.
+    by_ttl: Dict[int, set] = {}
+    for p in paths:
+        for h in p["hops"]:
+            ip = h.get("ip", "*")
+            if ip and ip != "*" and not _is_private(ip):
+                by_ttl.setdefault(h["hop"], set()).add(ip)
+
+    branches: Dict[int, List[Dict]] = {}
+    for ttl, ips in by_ttl.items():
+        if len(ips) < 2:
+            continue  # single next-hop → not a load-balancer
+        entries = []
+        for ip in sorted(ips):
+            asn = asn_map.get(ip, {})
+            entry = {
+                "ip": ip,
+                "provider": asn.get("provider", ""),
+                "asn": asn.get("asn", ""),
+                "country": asn.get("country", ""),
+                "classification": asn.get("classification", ""),
+                "hostname": rdns_map.get(ip, ""),
+                "cdn_provider": _is_cdn_ip_safe(ip),
+            }
+            entry["role"] = _classify_hop_role(entry)
+            entries.append(entry)
+        branches[ttl] = entries
+
+    summary["branches"] = branches
+    summary["divergence_hop"] = min(branches) if branches else None
+    return summary
+
+
+def _is_cdn_ip_safe(ip: str):
+    """is_cdn_ip that never raises (returns provider name or None)."""
+    try:
+        from . import asn_lookup as _asn_mod
+        return _asn_mod.is_cdn_ip(ip)
+    except Exception:
+        return None
+
+
 def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
-                   on_status=None) -> Dict[str, Any]:
+                   on_status=None, multipath: bool = True,
+                   flows: int = 8) -> Dict[str, Any]:
     """Run traceroute at multiple layers and classify each hop by ASN.
 
     Runs UDP traceroute (no root) and TCP traceroute on port 443 (needs root).
@@ -1093,119 +1336,13 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         hops: list of {hop, ip, rtt_ms, provider, asn, classification}
         method: which traceroute method(s) succeeded
         target_ip: resolved IP
+        multipath: ECMP flow enumeration summary (see _build_multipath_summary)
     """
-    import subprocess
     import shutil
     import concurrent.futures
 
     _status = on_status or (lambda *a: None)
     result = {"hops": [], "methods": [], "target_ip": ""}
-
-    def _stats(rtts: List[float], timeouts: int) -> Dict[str, Any]:
-        """Compute per-hop statistics from RTT samples and a timeout count."""
-        recv = len(rtts)
-        sent = recv + timeouts
-        out: Dict[str, Any] = {
-            "sent": sent, "recv": recv,
-            "loss_pct": round(timeouts / sent * 100, 1) if sent else 0.0,
-        }
-        if rtts:
-            avg = sum(rtts) / recv
-            var = sum((x - avg) ** 2 for x in rtts) / recv
-            out["best_ms"] = round(min(rtts), 3)
-            out["worst_ms"] = round(max(rtts), 3)
-            out["avg_ms"] = round(avg, 3)
-            out["stddev_ms"] = round(var ** 0.5, 3)
-            out["rtts"] = [round(x, 3) for x in rtts]
-            out["rtt_ms"] = round(avg, 3)   # headline value (backwards-compatible)
-        else:
-            out["rtt_ms"] = None
-        return out
-
-    def _parse_mpls(text: str) -> List[Dict]:
-        """Parse GNU traceroute -e MPLS stacks: <MPLS:L=24012,E=0,S=1,T=1>."""
-        labels = []
-        for lbl, exp, s, ttl in re.findall(
-                r'MPLS:?\s*L=(\d+),\s*E=(\d+),\s*S=(\d+),\s*T=(\d+)', text):
-            labels.append({"label": int(lbl), "exp": int(exp),
-                           "s": int(s), "ttl": int(ttl)})
-        return labels
-
-    def _parse_traceroute(output: str) -> List[Dict]:
-        """Parse GNU/BSD traceroute output (multi-probe stats, MPLS-aware)."""
-        hops = []
-        for line in output.strip().split("\n"):
-            line = line.strip()
-            if not line or line.startswith("traceroute"):
-                continue
-            # Parse: " 1  IP  1.2 ms  1.1 ms  1.0 ms" / " 3  * * *" / MPLS blocks
-            m = re.match(r'\s*(\d+)\s+(.+)', line)
-            if not m:
-                continue
-            hop_num = int(m.group(1))
-            rest = m.group(2)
-
-            # Extract first IP (hop may show multiple on ECMP — take first for now)
-            ip_match = re.search(r'\(?((?:\d{1,3}\.){3}\d{1,3})\)?', rest)
-            if not ip_match:
-                # Whole hop timed out (e.g. "* * *")
-                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
-                             "sent": rest.count("*") or None, "recv": 0,
-                             "loss_pct": 100.0})
-                continue
-
-            ip = ip_match.group(1)
-            rtts = [float(x) for x in re.findall(r'([\d.]+)\s*ms', rest)]
-            timeouts = rest.count("*")
-            hop: Dict[str, Any] = {"hop": hop_num, "ip": ip}
-            hop.update(_stats(rtts, timeouts))
-            mpls = _parse_mpls(rest)
-            if mpls:
-                hop["mpls"] = mpls
-            hops.append(hop)
-        return hops
-
-    def _parse_tracert(output: str) -> List[Dict]:
-        """Parse Windows tracert output (3 probes/hop, RTT columns in ms)."""
-        hops = []
-        for line in output.split("\n"):
-            m = re.match(r'\s*(\d+)\s+(.+)', line.rstrip())
-            if not m:
-                continue
-            hop_num = int(m.group(1))
-            rest = m.group(2)
-            # RTT columns look like "<1 ms", "10 ms", or "*"
-            rtts = [0.5 if v.startswith("<") else float(v)
-                    for v in re.findall(r'(<?\d+)\s*ms', rest)]
-            timeouts = len(re.findall(r'\*', rest))
-            ip_match = re.search(r'((?:\d{1,3}\.){3}\d{1,3})', rest)
-            if not ip_match:
-                hops.append({"hop": hop_num, "ip": "*", "rtt_ms": None,
-                             "sent": timeouts or None, "recv": 0,
-                             "loss_pct": 100.0})
-                continue
-            hop: Dict[str, Any] = {"hop": hop_num, "ip": ip_match.group(1)}
-            hop.update(_stats(rtts, timeouts))
-            hops.append(hop)
-        return hops
-
-    def _run_cmd(cmd: List[str], parser) -> Optional[List[Dict]]:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  errors="replace",
-                                  timeout=max_hops * timeout + 30)
-            # tracert/traceroute can exit non-zero yet still print usable hops
-            if proc.stdout and proc.stdout.strip():
-                parsed = parser(proc.stdout)
-                if parsed:
-                    return parsed
-        except FileNotFoundError:
-            pass
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            pass
-        return None
 
     # Run traceroutes in parallel across protocols
     methods = []
@@ -1266,7 +1403,7 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = {}
         for cmd, label, root, parser in cmds:
-            futures[pool.submit(_run_cmd, cmd, parser)] = (label, root)
+            futures[pool.submit(_run_tr_cmd, cmd, parser, timeout, max_hops)] = (label, root)
 
         for f in concurrent.futures.as_completed(futures):
             label, root = futures[f]
@@ -1297,26 +1434,46 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
     while hops and hops[-1]["ip"] == "*":
         hops.pop()
 
-    # ASN-classify all real IPs
-    real_ips = [h["ip"] for h in hops if h["ip"] != "*" and not _is_private(h["ip"])]
+    # ── Multipath / ECMP enumeration (runs before the ASN lookup so its IPs
+    #    can share the same bulk queries as the primary path) ──
+    mp = {"paths": [], "supported": False}
+    if multipath:
+        is_root = (getattr(os, "geteuid", lambda: 1)() == 0)
+        mp = _enumerate_multipath(domain, max_hops, timeout, is_root,
+                                  _status, flows=flows)
+
+    # Union of every real IP seen across the primary path and all ECMP flows.
+    all_real: List[str] = []
+    seen = set()
+    for h in hops:
+        ip = h["ip"]
+        if ip != "*" and ip not in seen:
+            seen.add(ip); all_real.append(ip)
+    for p in mp.get("paths", []):
+        for h in p["hops"]:
+            ip = h.get("ip", "*")
+            if ip != "*" and ip not in seen:
+                seen.add(ip); all_real.append(ip)
+
+    # ASN-classify all public IPs (single bulk query for primary + flows)
+    public_ips = [ip for ip in all_real if not _is_private(ip)]
     asn_map = {}
-    if real_ips:
-        _status("trace", f"ASN classification for {len(real_ips)} hop(s)")
+    if public_ips:
+        _status("trace", f"ASN classification for {len(public_ips)} hop(s)")
         try:
             from . import asn_lookup
-            asn_records = asn_lookup.lookup_asn_bulk(real_ips)
+            asn_records = asn_lookup.lookup_asn_bulk(public_ips)
             asn_map = {r["ip"]: r for r in asn_records}
         except Exception:
             pass
 
     # Reverse DNS for all real IPs (parallel, fast)
     rdns_map = {}
-    real_and_private = [h["ip"] for h in hops if h["ip"] != "*"]
-    if real_and_private:
-        _status("trace", f"Reverse DNS for {len(real_and_private)} hop(s)")
-        rdns_map = _bulk_rdns(real_and_private)
+    if all_real:
+        _status("trace", f"Reverse DNS for {len(all_real)} hop(s)")
+        rdns_map = _bulk_rdns(all_real)
 
-    # Enrich hops with ASN data, rDNS, CDN CIDR, and role classification
+    # Enrich primary hops with ASN data, rDNS, CDN CIDR, and role classification
     from . import asn_lookup as _asn_mod
     for h in hops:
         ip = h["ip"]
@@ -1338,6 +1495,17 @@ def run_traceroute(domain: str, timeout: int = 3, max_hops: int = 30,
         last_real = next((h for h in reversed(hops) if h["ip"] != "*"), None)
         if last_real:
             result["target_ip"] = last_real["ip"]
+
+    # ── ECMP summary (sharing the ASN/rDNS maps built above) ──
+    if multipath:
+        summary = _build_multipath_summary(mp.get("paths", []), asn_map, rdns_map)
+        summary["supported"] = mp.get("supported", False)
+        if mp.get("note"):
+            summary["note"] = mp["note"]
+        if mp.get("transport"):
+            summary["transport"] = mp["transport"]
+        result["multipath"] = summary
+        result["paths"] = mp.get("paths", [])
 
     # If many hops are filtered, fetch BGP AS path to show intermediate networks
     total = len(hops)
